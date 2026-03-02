@@ -72,8 +72,4 @@ Point your media servers to the following endpoints:
     Jellyfin: http://throttlarr:5000/jellyfin
 
 > [!IMPORTANT]
-> SABnzbd Host Whitelist
-> Because this app communicates via Docker's internal DNS, you must allow the hostname in SABnzbd:
->   Go to SABnzbd Settings -> General.
->    Switch to Advanced View.
->    Add throttlarr to the Host Whitelist field and save.
+> Because this app communicates via Docker's internal DNS, you must allow the hostname in SABnzbd. Go to SABnzbd Settings -> General, Switch to Advanced View. Add "sabnzbd" to the Host Whitelist field and save. It should be simply "sabnzbd.example.com, sabnzbd"
