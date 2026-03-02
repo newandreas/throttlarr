@@ -8,23 +8,36 @@ import time
 
 app = Flask(__name__)
 
-# Grab environment variables
-QBT_HOST = os.getenv('QB_HOST', '192.168.1.69:8080')
+# --- URL SANITIZER ---
+def fix_url(url):
+    """Ensures URLs have the http:// prefix and no trailing slash."""
+    if not url:
+        return ""
+    url = url.strip()
+    if not url.startswith(('http://', 'https://')):
+        url = 'http://' + url
+    return url.rstrip('/')
+
+# --- ENVIRONMENT VARIABLES ---
+QBT_HOST = fix_url(os.getenv('QB_HOST', 'torrent:8080'))
 QBT_USER = os.getenv('QB_USER', 'Andreas')
 QBT_PASS = os.getenv('QB_PASS', 'redacted')
 
-TRACEARR_URL = os.getenv('TRACEARR_URL', 'https://tracearr.nikolaisen.xyz').rstrip('/')
+TRACEARR_URL = fix_url(os.getenv('TRACEARR_URL', 'tracearr:3000'))
 TRACEARR_TOKEN = os.getenv('TRACEARR_TOKEN', '')
 
-SAB_HOST = os.getenv('SAB_HOST', '192.168.1.69:8081').rstrip('/')
+SAB_HOST = fix_url(os.getenv('SAB_HOST', 'sabnzbd:8080'))
 SAB_API_KEY = os.getenv('SAB_API_KEY', '')
-SAB_THROTTLE_SPEED = os.getenv('SAB_THROTTLE_SPEED', '20M') # 20 MB/s
-SAB_FULL_SPEED = os.getenv('SAB_FULL_SPEED', '0')           # 0 means unlimited
+SAB_THROTTLE_SPEED = os.getenv('SAB_THROTTLE_SPEED', '20M')
+SAB_FULL_SPEED = os.getenv('SAB_FULL_SPEED', '0')
+
+# --- GLOBALS ---
+active_sessions = set()
 
 # Connect to qBittorrent
 qbt_client = qbittorrentapi.Client(host=QBT_HOST, username=QBT_USER, password=QBT_PASS)
-active_sessions = set()
 
+# --- CORE LOGIC ---
 def update_speeds():
     """Handles throttling for both qBittorrent and SABnzbd"""
     throttle_enabled = len(active_sessions) > 0
@@ -46,9 +59,7 @@ def update_speeds():
     if SAB_API_KEY:
         try:
             target_speed = SAB_THROTTLE_SPEED if throttle_enabled else SAB_FULL_SPEED
-            # Ensure host has http://
-            base_url = f"http://{SAB_HOST}" if not SAB_HOST.startswith('http') else SAB_HOST
-            sab_url = f"{base_url}/api?mode=config&name=speedlimit&value={target_speed}&apikey={SAB_API_KEY}&output=json"
+            sab_url = f"{SAB_HOST}/api?mode=config&name=speedlimit&value={target_speed}&apikey={SAB_API_KEY}&output=json"
             
             response = requests.get(sab_url, timeout=5)
             if response.status_code == 200:
@@ -58,7 +69,6 @@ def update_speeds():
                 print(f"[ERROR] SABnzbd HTTP {response.status_code}: {response.text}", flush=True)
         except Exception as e:
             print(f"[ERROR] Failed to communicate with SABnzbd: {e}", flush=True)
-
 
 def sync_with_tracearr():
     """Background thread that checks Tracearr every 5 minutes to fix missed webhooks."""
@@ -98,8 +108,10 @@ def sync_with_tracearr():
         except Exception as e:
             print(f"[TRACEARR SYNC] Failed to connect to Tracearr: {e}", flush=True)
             
+        # Sleep for 5 minutes (300 seconds)
         time.sleep(300)
 
+# --- WEBHOOK ENDPOINTS ---
 @app.route('/plex', methods=['POST'])
 def plex_webhook():
     payload = request.form.get('payload')
@@ -147,14 +159,13 @@ def jellyfin_webhook():
         
     return "OK", 200
 
+# --- INITIALIZATION ---
 def start_background_threads():
     print("[SYSTEM] Initializing background sync thread...", flush=True)
     thread = threading.Thread(target=sync_with_tracearr, daemon=True)
     thread.start()
 
-# Call it immediately
 start_background_threads()
 
 if __name__ == '__main__':
-    # This only runs if you do 'python app.py' manually
     app.run(host='0.0.0.0', port=5000)
