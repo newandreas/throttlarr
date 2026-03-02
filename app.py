@@ -91,16 +91,19 @@ def sync_with_tracearr():
                 data = response.json()
                 total_streams = data.get('summary', {}).get('total', 0)
                 
-                # Scenario 1: We missed a 'Stop' webhook
+                # Scenario 1: Tracearr says 0, but we have stuck sessions
                 if total_streams == 0 and len(active_sessions) > 0:
                     print(f"\n[TRACEARR SYNC] Mismatch! Tracearr says 0 streams, but we have {len(active_sessions)}. Clearing stale sessions.", flush=True)
                     active_sessions.clear()
                     update_speeds()
                     
-                # Scenario 2: We missed a 'Start' webhook
-                elif total_streams > 0 and len(active_sessions) == 0:
-                    print(f"\n[TRACEARR SYNC] Mismatch! Tracearr says {total_streams} streams, but we show 0. Engaging throttle.", flush=True)
-                    active_sessions.add('tracearr_fallback_session')
+                # Scenario 2: Tracearr sees more streams than our webhook list
+                elif total_streams > len(active_sessions):
+                    missing = total_streams - len(active_sessions)
+                    print(f"\n[TRACEARR SYNC] Mismatch! Tracearr says {total_streams} streams, but we have {len(active_sessions)}. Adding {missing} fallback session(s).", flush=True)
+                    for i in range(missing):
+                        # Generate a unique fallback ID so we can stack multiple unknown streams
+                        active_sessions.add(f'tracearr_fallback_{time.time()}_{i}')
                     update_speeds()
             else:
                 print(f"[TRACEARR SYNC] Error HTTP {response.status_code}: {response.text}", flush=True)
@@ -108,8 +111,20 @@ def sync_with_tracearr():
         except Exception as e:
             print(f"[TRACEARR SYNC] Failed to connect to Tracearr: {e}", flush=True)
             
-        # Sleep for 5 minutes (300 seconds)
         time.sleep(300)
+
+def handle_stop_event(session_id):
+    """Smartly removes a session or a fallback if the session is unknown."""
+    if session_id in active_sessions:
+        active_sessions.remove(session_id)
+    else:
+        # We got a stop event for a session we didn't track. 
+        # It must be one of the streams Tracearr caught. Let's remove a fallback.
+        fallback = next((s for s in active_sessions if s.startswith('tracearr_fallback')), None)
+        if fallback:
+            print(f"[SYSTEM] Unrecognized session stopped. Removing a Tracearr fallback placeholder.", flush=True)
+            active_sessions.remove(fallback)
+    update_speeds()
 
 # --- WEBHOOK ENDPOINTS ---
 @app.route('/plex', methods=['POST'])
@@ -129,13 +144,11 @@ def plex_webhook():
             active_sessions.add(session_id)
             update_speeds()
         elif event in ['media.pause', 'media.stop']:
-            active_sessions.discard(session_id)
-            active_sessions.discard('tracearr_fallback_session')
-            update_speeds()
+            handle_stop_event(session_id)
             
     except Exception as e:
         print(f"[PLEX ERROR] Failed to parse payload: {e}", flush=True)
-        
+
     return "OK", 200
 
 @app.route('/jellyfin', methods=['POST'])
@@ -153,12 +166,10 @@ def jellyfin_webhook():
         active_sessions.add(session_id)
         update_speeds()
     elif event in ['PlaybackStop', 'PlaybackPause']:
-        active_sessions.discard(session_id)
-        active_sessions.discard('tracearr_fallback_session')
-        update_speeds()
+        handle_stop_event(session_id)
         
     return "OK", 200
-
+    
 # --- INITIALIZATION ---
 def start_background_threads():
     print("[SYSTEM] Initializing background sync thread...", flush=True)

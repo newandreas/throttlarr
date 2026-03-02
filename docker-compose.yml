@@ -1,0 +1,23 @@
+services:
+  throttlarr:
+    image: ghcr.io/newandreas/throttlarr:latest
+    container_name: throttlarr
+    restart: unless-stopped
+    # Use internal docker networking (no ports exposed) if Plex/Jellyfin are in the same network
+    # ports:
+    #   - "5000:5000" 
+    environment:
+      # qBittorrent Config
+      - QB_HOST=torrent:8080 # Service name or http://IP:PORT
+      - QB_USER=${QB_USER}
+      - QB_PASS=${QB_PASS}
+
+      # SABnzbd Config
+      - SAB_HOST=sabnzbd:1337
+      - SAB_API_KEY=${SAB_API_KEY}
+      - SAB_THROTTLE_SPEED=20M # Speed when watching (e.g., 20M)
+      - SAB_FULL_SPEED=0      # 0 = Unlimited
+
+      # Tracearr Config
+      - TRACEARR_URL=tracearr:3000
+      - TRACEARR_TOKEN=${TRACEARR_API_KEY}
