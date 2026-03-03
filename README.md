@@ -9,9 +9,8 @@ Throttlarr is a Python service that manages your download speeds. Monitors your 
 
 * **Instant Response:** Uses webhooks to throttle speeds the second a stream starts.
 
-* Periodically polls Tracearr to ensure speeds are released even if a "Stop" webhook is missed.
+* Periodically polls Tracearr to ensure speeds are only released when we know nobody is watching.
 
-* Smart Logic: Tracks multiple concurrent sessions and only releases the throttle when the last person stops watching.
 
 ## 📦 Deployment
 ### Docker Compose
