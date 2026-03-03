@@ -1,18 +1,18 @@
 # Throttlarr
 
-Throttlarr is a Python service that manages your download speeds. Monitors your Plex and Jellyfin streams via webhooks and [Tracearr](https://github.com/connorgallopo/Tracearr), instantly throttling qBittorrent and SABnzbd when someone hits play to ensure a buffer-free viewing experience.
+Throttlarr is a Python service that manages your download speeds. It monitors your **Plex**, **Jellyfin**, and **Emby** streams via webhooks and [Tracearr](https://github.com/connorgallopo/Tracearr), instantly throttling qBittorrent and SABnzbd when someone hits play to ensure a buffer-free viewing experience.
 
 > [!CAUTION]
-> This app was coded with the help of LLMs, I am not a professional coder. Don't trust the the app to be safe enough to expose to the internet.
+> This app was coded with the help of LLMs, I am not a professional coder. Don't trust the app to be safe enough to expose to the internet.
 
 ## 🛠️ Features
 
-* **Instant Response:** Uses webhooks to throttle speeds the second a stream starts.
-
-* Periodically polls Tracearr to ensure speeds are only released when we know nobody is watching.
-
+* **Instant Response:** Uses webhooks to throttle speeds the instant stream starts.
+* Periodically polls Tracearr to ensure speeds are only increased when we know nobody is watching.
+* **Scalable:** Supports 1, 2, or 100 media servers. If you have multiple Plex, Jellyfin, or Emby instances, Tracearr aggregates them all into one stream count.
 
 ## 📦 Deployment
+
 ### Docker Compose
 
 ```yaml
@@ -21,7 +21,7 @@ services:
     image: ghcr.io/newandreas/throttlarr:latest
     container_name: throttlarr
     restart: unless-stopped
-    # Use internal docker networking (no ports exposed) if Plex/Jellyfin are in the same network
+    # Use internal docker networking (no ports exposed) if Plex/Jellyfin/Emby are in the same network
     # ports:
     #   - "5000:5000" 
     environment:
@@ -40,9 +40,11 @@ services:
       - TRACEARR_URL=tracearr:3000
       - TRACEARR_TOKEN=${TRACEARR_API_KEY}
       - TRACEARR_SYNC_INTERVAL=300 # How often to poll Tracearr in seconds (default: 300, 5 minutes)
+
 ```
 
 ### Example [.env file](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/#use-the-env_file-attribute)
+
 ```ini
 # qBittorrent
 QB_USER=admin
@@ -53,6 +55,7 @@ SAB_API_KEY=your_32_char_api_key
 
 # Tracearr
 TRACEARR_API_KEY=trr_pub_your_token
+
 ```
 
 Run the container:
@@ -63,38 +66,69 @@ docker compose up -d
 ```
 
 ## 🔧 Configuration
-### Webhooks
 
-Point your media servers to the following endpoints:
+### Webhooks (optional)
 
-    Plex: http://throttlarr:5000/plex
+Because Throttlarr relies on Tracearr to detect when streams *stop*, you only need to send webhooks when a stream *starts* or *resumes*.
 
-    Jellyfin: http://throttlarr:5000/jellyfin
+Point your media servers webhooks to the following endpoints:
 
-### 🦑 Jellyfin:
-* Go to Plugins
-* Download and install Webhook plugin and restart Jellyfin
-* Go to Plugins, press Webhook and press Settings
-* Add Generic Destination
-* Add http://throttlarr:5000/jellyfin
-* Select "Playback Start" and "Playback Stop"
-* Copy and paste this into Template:
+* **Plex:** `http://throttlarr:5000/plex`
+* **Jellyfin:** `http://throttlarr:5000/jellyfin`
+* **Emby:** `http://throttlarr:5000/emby`
+
+---
+
+### 🦑 Jellyfin
+
+1. Go to **Dashboard** -> **Plugins**.
+2. Download and install the **Webhook** plugin, then restart Jellyfin.
+3. Go back to Plugins, click Webhook, and press **Settings**.
+4. Click **Add Generic Destination**.
+5. **Webhook Url:** `http://throttlarr:5000/jellyfin`
+6. **Notification Type:** Check only **Playback Start** and **Playback Unpause**.
+7. Copy and paste this into the **Template** box:
 
 ```json
 {
-  "NotificationType": "{{NotificationType}}",
-  "DeviceId": "{{DeviceId}}",
-  "DeviceName": "{{DeviceName}}",
-  "Username": "{{NotificationUsername}}",
-  "MediaTitle": "{{Name}}"
+  "NotificationType": "{{NotificationType}}"
 }
 ```
 
-### Plex:
-* Go to Settings
-* Under your user, select Webhooks
-* Add http://throttlarr:5000/plex
+8. Save!
 
-### SABnzbd:
+---
+
+### 🎬 Emby
+
+> [!NOTE]
+> Native Webhooks in Emby typically require Emby Premiere.
+
+1. Go to **Settings** -> **Server** -> **Webhooks**.
+2. Click **Add Webhook**.
+3. **URL:** `http://throttlarr:5000/emby`
+4. **Data Format:** `application/json`
+5. **Events:** Check **Playback Start** and **Playback Unpause**.
+6. Save! 
+
+---
+
+### 🍿 Plex
+
+1. Go to **Settings**.
+2. Under your user account (top left), select **Webhooks**.
+3. Click **Add Webhook**.
+4. **URL:** `http://throttlarr:5000/plex`
+5. Save!
+
+---
+
+### ⬇️ SABnzbd
+
 > [!IMPORTANT]
-> Because this app communicates via Docker's internal DNS, you must allow the hostname in SABnzbd. Go to SABnzbd Settings -> General, Switch to Advanced View. Add "sabnzbd" to the Host Whitelist field and save. It should be simply "sabnzbd.example.com, sabnzbd"
+> Because this app communicates via Docker's internal DNS, you must allow the hostname in SABnzbd.
+> 1. Go to SABnzbd **Settings** -> **General**.
+> 2. Switch to **Advanced View** (top right corner).
+> 3. Add `sabnzbd` to the **Host Whitelist** field and save. It should look like `sabnzbd.example.com, sabnzbd`.
+> 
+>
