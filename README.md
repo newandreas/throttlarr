@@ -39,6 +39,7 @@ services:
       # Tracearr Config
       - TRACEARR_URL=tracearr:3000
       - TRACEARR_TOKEN=${TRACEARR_API_KEY}
+      - TRACEARR_SYNC_INTERVAL=300 # How often to poll Tracearr in seconds (default: 300, 5 minutes)
 ```
 
 ### Example [.env file](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/#use-the-env_file-attribute)
