@@ -32,33 +32,39 @@ SAB_THROTTLE_SPEED = os.getenv('SAB_THROTTLE_SPEED', '20M')
 SAB_FULL_SPEED = os.getenv('SAB_FULL_SPEED', '0')
 
 # --- GLOBALS ---
-active_sessions = set()
+is_throttled = False
 
 # Connect to qBittorrent
 qbt_client = qbittorrentapi.Client(host=QBT_HOST, username=QBT_USER, password=QBT_PASS)
 
 # --- CORE LOGIC ---
-def update_speeds():
-    """Handles throttling for both qBittorrent and SABnzbd"""
-    throttle_enabled = len(active_sessions) > 0
+def set_throttles(enable_throttle: bool, reason: str):
+    """Engages or releases throttles, preventing duplicate API calls."""
+    global is_throttled
     
-    if throttle_enabled:
-        print(f"\n[ACTION] Active streams: {len(active_sessions)}. Engaging throttles!", flush=True)
+    # If the state isn't changing, do nothing!
+    if enable_throttle == is_throttled:
+        return
+        
+    is_throttled = enable_throttle
+    
+    if is_throttled:
+        print(f"\n[ACTION] Engaging throttles! (Trigger: {reason})", flush=True)
     else:
-        print("\n[ACTION] No active streams. Releasing throttles (Full speed!).", flush=True)
+        print(f"\n[ACTION] Releasing throttles (Full speed!). (Trigger: {reason})", flush=True)
 
     # 1. Update qBittorrent
     try:
         qbt_client.auth_log_in()
-        qbt_client.transfer.set_speed_limits_mode(throttle_enabled)
-        print(f"[SUCCESS] qBittorrent throttle set to: {throttle_enabled}", flush=True)
+        qbt_client.transfer.set_speed_limits_mode(is_throttled)
+        print(f"[SUCCESS] qBittorrent throttle set to: {is_throttled}", flush=True)
     except Exception as e:
         print(f"[ERROR] Failed to communicate with qBittorrent: {e}", flush=True)
         
     # 2. Update SABnzbd
     if SAB_API_KEY:
         try:
-            target_speed = SAB_THROTTLE_SPEED if throttle_enabled else SAB_FULL_SPEED
+            target_speed = SAB_THROTTLE_SPEED if is_throttled else SAB_FULL_SPEED
             sab_url = f"{SAB_HOST}/api?mode=config&name=speedlimit&value={target_speed}&apikey={SAB_API_KEY}&output=json"
             
             response = requests.get(sab_url, timeout=5)
@@ -71,7 +77,7 @@ def update_speeds():
             print(f"[ERROR] Failed to communicate with SABnzbd: {e}", flush=True)
 
 def sync_with_tracearr():
-    """Background thread that checks Tracearr every 5 minutes to fix missed webhooks."""
+    """Background thread that acts as source of truth."""
     if not TRACEARR_TOKEN:
         print("[TRACEARR] No API token provided. Background sync disabled.", flush=True)
         return
@@ -91,40 +97,18 @@ def sync_with_tracearr():
                 data = response.json()
                 total_streams = data.get('summary', {}).get('total', 0)
                 
-                # Scenario 1: Tracearr says 0, but we have stuck sessions
-                if total_streams == 0 and len(active_sessions) > 0:
-                    print(f"\n[TRACEARR SYNC] Mismatch! Tracearr says 0 streams, but we have {len(active_sessions)}. Clearing stale sessions.", flush=True)
-                    active_sessions.clear()
-                    update_speeds()
-                    
-                # Scenario 2: Tracearr sees more streams than our webhook list
-                elif total_streams > len(active_sessions):
-                    missing = total_streams - len(active_sessions)
-                    print(f"\n[TRACEARR SYNC] Mismatch! Tracearr says {total_streams} streams, but we have {len(active_sessions)}. Adding {missing} fallback session(s).", flush=True)
-                    for i in range(missing):
-                        # Generate a unique fallback ID so we can stack multiple unknown streams
-                        active_sessions.add(f'tracearr_fallback_{time.time()}_{i}')
-                    update_speeds()
+                if total_streams == 0:
+                    set_throttles(False, reason="Tracearr reports 0 streams")
+                else:
+                    set_throttles(True, reason=f"Tracearr reports {total_streams} streams")
             else:
                 print(f"[TRACEARR SYNC] Error HTTP {response.status_code}: {response.text}", flush=True)
                 
         except Exception as e:
             print(f"[TRACEARR SYNC] Failed to connect to Tracearr: {e}", flush=True)
             
+        # Sleep for 5 minutes (300 seconds)
         time.sleep(300)
-
-def handle_stop_event(session_id):
-    """Smartly removes a session or a fallback if the session is unknown."""
-    if session_id in active_sessions:
-        active_sessions.remove(session_id)
-    else:
-        # We got a stop event for a session we didn't track. 
-        # It must be one of the streams Tracearr caught. Let's remove a fallback.
-        fallback = next((s for s in active_sessions if s.startswith('tracearr_fallback')), None)
-        if fallback:
-            print(f"[SYSTEM] Unrecognized session stopped. Removing a Tracearr fallback placeholder.", flush=True)
-            active_sessions.remove(fallback)
-    update_speeds()
 
 # --- WEBHOOK ENDPOINTS ---
 @app.route('/plex', methods=['POST'])
@@ -136,19 +120,14 @@ def plex_webhook():
     try:
         data = json.loads(payload)
         event = data.get('event')
-        session_id = data.get('Player', {}).get('uuid', 'unknown_plex_session')
         
-        print(f"[PLEX] Event: {event} | Session ID: {session_id}", flush=True)
-        
+        # We only care about Play and Resume. Everything else is completely ignored!
         if event in ['media.play', 'media.resume']:
-            active_sessions.add(session_id)
-            update_speeds()
-        elif event in ['media.pause', 'media.stop']:
-            handle_stop_event(session_id)
+            set_throttles(True, reason=f"Plex Webhook ({event})")
             
     except Exception as e:
         print(f"[PLEX ERROR] Failed to parse payload: {e}", flush=True)
-
+        
     return "OK", 200
 
 @app.route('/jellyfin', methods=['POST'])
@@ -158,18 +137,13 @@ def jellyfin_webhook():
         return "No payload", 400
         
     event = data.get('NotificationType')
-    session_id = data.get('DeviceId', 'unknown_jf_session')
     
-    print(f"[JELLYFIN] Event: {event} | Session ID: {session_id}", flush=True)
-    
+    # We only care about Play and Resume. Everything else is completely ignored!
     if event in ['PlaybackStart', 'PlaybackUnpause']:
-        active_sessions.add(session_id)
-        update_speeds()
-    elif event in ['PlaybackStop', 'PlaybackPause']:
-        handle_stop_event(session_id)
+        set_throttles(True, reason=f"Jellyfin Webhook ({event})")
         
     return "OK", 200
-    
+
 # --- INITIALIZATION ---
 def start_background_threads():
     print("[SYSTEM] Initializing background sync thread...", flush=True)
