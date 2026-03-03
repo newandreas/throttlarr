@@ -31,6 +31,13 @@ SAB_API_KEY = os.getenv('SAB_API_KEY', '')
 SAB_THROTTLE_SPEED = os.getenv('SAB_THROTTLE_SPEED', '20M')
 SAB_FULL_SPEED = os.getenv('SAB_FULL_SPEED', '0')
 
+# Safely parse the sync interval (defaults to 300 seconds / 5 minutes)
+try:
+    TRACEARR_SYNC_INTERVAL = int(os.getenv('TRACEARR_SYNC_INTERVAL', '300'))
+except ValueError:
+    print("[WARNING] Invalid TRACEARR_SYNC_INTERVAL provided. Defaulting to 300 seconds.", flush=True)
+    TRACEARR_SYNC_INTERVAL = 300
+
 # --- GLOBALS ---
 is_throttled = False
 
@@ -82,7 +89,7 @@ def sync_with_tracearr():
         print("[TRACEARR] No API token provided. Background sync disabled.", flush=True)
         return
         
-    print("[TRACEARR] Background sync started. Polling every 5 minutes.", flush=True)
+    print(f"[TRACEARR] Background sync started. Polling every {TRACEARR_SYNC_INTERVAL} seconds.", flush=True)
     
     while True:
         try:
@@ -107,8 +114,7 @@ def sync_with_tracearr():
         except Exception as e:
             print(f"[TRACEARR SYNC] Failed to connect to Tracearr: {e}", flush=True)
             
-        # Sleep for 5 minutes (300 seconds)
-        time.sleep(300)
+        time.sleep(TRACEARR_SYNC_INTERVAL)
 
 # --- WEBHOOK ENDPOINTS ---
 @app.route('/plex', methods=['POST'])
@@ -121,7 +127,6 @@ def plex_webhook():
         data = json.loads(payload)
         event = data.get('event')
         
-        # We only care about Play and Resume. Everything else is completely ignored!
         if event in ['media.play', 'media.resume']:
             set_throttles(True, reason=f"Plex Webhook ({event})")
             
@@ -138,7 +143,6 @@ def jellyfin_webhook():
         
     event = data.get('NotificationType')
     
-    # We only care about Play and Resume. Everything else is completely ignored!
     if event in ['PlaybackStart', 'PlaybackUnpause']:
         set_throttles(True, reason=f"Jellyfin Webhook ({event})")
         
