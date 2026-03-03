@@ -40,6 +40,9 @@ services:
       - TRACEARR_URL=tracearr:3000
       - TRACEARR_TOKEN=${TRACEARR_API_KEY}
       - TRACEARR_SYNC_INTERVAL=300 # How often to poll Tracearr in seconds (default: 300, 5 minutes)
+    depends_on:
+      tracearr:
+        condition: service_healthy
 
 ```
 
