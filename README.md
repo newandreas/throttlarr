@@ -1,6 +1,6 @@
 # Throttlarr
 
-Throttlarr is a Python service that manages your download speeds. Monitors your Plex and Jellyfin streams via webhooks and Tracearr, instantly throttling qBittorrent and SABnzbd when someone hits play to ensure a buffer-free viewing experience.
+Throttlarr is a Python service that manages your download speeds. Monitors your Plex and Jellyfin streams via webhooks and [Tracearr](https://github.com/connorgallopo/Tracearr), instantly throttling qBittorrent and SABnzbd when someone hits play to ensure a buffer-free viewing experience.
 
 > [!CAUTION]
 > This app was coded with the help of LLMs, I am not a professional coder. Don't trust the the app to be safe enough to expose to the internet.
@@ -42,7 +42,7 @@ services:
       - TRACEARR_TOKEN=${TRACEARR_API_KEY}
 ```
 
-### Example .env
+### Example [.env file](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/#use-the-env_file-attribute)
 ```ini
 # qBittorrent
 QB_USER=admin
@@ -71,7 +71,14 @@ Point your media servers to the following endpoints:
 
     Jellyfin: http://throttlarr:5000/jellyfin
 
-Add this to the Jellyfin webhook template:
+### 🦑 Jellyfin:
+* Go to Plugins
+* Download and install Webhook plugin and restart Jellyfin
+* Go to Plugins, press Webhook and press Settings
+* Add Generic Destination
+* Add http://throttlarr:5000/jellyfin
+* Select "Playback Start" and "Playback Stop"
+* Copy and paste this into Template:
 
 ```json
 {
@@ -83,7 +90,11 @@ Add this to the Jellyfin webhook template:
 }
 ```
 
-Check Playback Start and Stop
+### Plex:
+* Go to Settings
+* Under your user, select Webhooks
+* Add http://throttlarr:5000/plex
 
+### SABnzbd:
 > [!IMPORTANT]
 > Because this app communicates via Docker's internal DNS, you must allow the hostname in SABnzbd. Go to SABnzbd Settings -> General, Switch to Advanced View. Add "sabnzbd" to the Host Whitelist field and save. It should be simply "sabnzbd.example.com, sabnzbd"
