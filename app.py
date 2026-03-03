@@ -148,6 +148,19 @@ def jellyfin_webhook():
         
     return "OK", 200
 
+@app.route('/emby', methods=['POST'])
+def emby_webhook():
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return "No payload", 400
+        
+    event = data.get('Event')
+    
+    if event in ['playback.start', 'playback.unpause']:
+        set_throttles(True, reason=f"Emby Webhook ({event})")
+        
+    return "OK", 200
+
 # --- INITIALIZATION ---
 def start_background_threads():
     print("[SYSTEM] Initializing background sync thread...", flush=True)
