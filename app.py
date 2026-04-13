@@ -31,7 +31,6 @@ SAB_API_KEY = os.getenv('SAB_API_KEY', '')
 SAB_THROTTLE_SPEED = os.getenv('SAB_THROTTLE_SPEED', '20M')
 SAB_FULL_SPEED = os.getenv('SAB_FULL_SPEED', '0')
 
-# Safely parse the sync interval (defaults to 300 seconds / 5 minutes)
 try:
     TRACEARR_SYNC_INTERVAL = int(os.getenv('TRACEARR_SYNC_INTERVAL', '300'))
 except ValueError:
@@ -49,7 +48,6 @@ def set_throttles(enable_throttle: bool, reason: str):
     """Engages or releases throttles, preventing duplicate API calls."""
     global is_throttled
     
-    # If the state isn't changing, do nothing!
     if enable_throttle == is_throttled:
         return
         
@@ -84,7 +82,7 @@ def set_throttles(enable_throttle: bool, reason: str):
             print(f"[ERROR] Failed to communicate with SABnzbd: {e}", flush=True)
 
 def sync_with_tracearr():
-    """Background thread that acts as source of truth."""
+    """Background thread that acts as the absolute source of truth (Video only)."""
     if not TRACEARR_TOKEN:
         print("[TRACEARR] No API token provided. Background sync disabled.", flush=True)
         return
@@ -97,17 +95,27 @@ def sync_with_tracearr():
                 'accept': 'application/json',
                 'Authorization': f'Bearer {TRACEARR_TOKEN}'
             }
-            url = f"{TRACEARR_URL}/api/v1/public/streams?summary=true"
+            url = f"{TRACEARR_URL}/api/v1/public/streams"
             response = requests.get(url, headers=headers, timeout=10)
             
             if response.status_code == 200:
-                data = response.json()
-                total_streams = data.get('summary', {}).get('total', 0)
+                payload = response.json()
                 
-                if total_streams == 0:
-                    set_throttles(False, reason="Tracearr reports 0 streams")
+                # Tracearr stores the array of streams in the 'data' key
+                streams = payload.get('data', [])
+                
+                video_streams = 0
+                for stream in streams:
+                    media_type = str(stream.get('mediaType', '')).lower()
+                    
+                    # Ignore music! Only count video streams (movies, episodes, etc.)
+                    if media_type not in ['track', 'audio', 'music']:
+                        video_streams += 1
+                
+                if video_streams == 0:
+                    set_throttles(False, reason="Tracearr reports 0 video streams")
                 else:
-                    set_throttles(True, reason=f"Tracearr reports {total_streams} streams")
+                    set_throttles(True, reason=f"Tracearr reports {video_streams} video stream(s)")
             else:
                 print(f"[TRACEARR SYNC] Error HTTP {response.status_code}: {response.text}", flush=True)
                 
@@ -127,6 +135,12 @@ def plex_webhook():
         data = json.loads(payload)
         event = data.get('event')
         
+        # Filter out music from Plex
+        media_type = data.get('Metadata', {}).get('type', '').lower()
+        if media_type in ['track', 'audio']:
+            print(f"[PLEX] Ignored audio stream webhook.", flush=True)
+            return "Ignored audio", 200
+        
         if event in ['media.play', 'media.resume']:
             set_throttles(True, reason=f"Plex Webhook ({event})")
             
@@ -143,6 +157,12 @@ def jellyfin_webhook():
         
     event = data.get('NotificationType')
     
+    # Filter out music from Jellyfin (requires "ItemType" in webhook template)
+    item_type = data.get('ItemType', '').lower()
+    if item_type in ['audio', 'music']:
+        print(f"[JELLYFIN] Ignored audio stream webhook.", flush=True)
+        return "Ignored audio", 200
+    
     if event in ['PlaybackStart', 'PlaybackUnpause']:
         set_throttles(True, reason=f"Jellyfin Webhook ({event})")
         
@@ -155,6 +175,12 @@ def emby_webhook():
         return "No payload", 400
         
     event = data.get('Event')
+    
+    # Filter out music from Emby
+    item_type = data.get('Item', {}).get('MediaType', '').lower()
+    if item_type in ['audio', 'music']:
+        print(f"[EMBY] Ignored audio stream webhook.", flush=True)
+        return "Ignored audio", 200
     
     if event in ['playback.start', 'playback.unpause']:
         set_throttles(True, reason=f"Emby Webhook ({event})")
