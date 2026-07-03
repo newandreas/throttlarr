@@ -1,15 +1,23 @@
 # Throttlarr
 
-Throttlarr is a Python service that manages your download speeds. It monitors your **Plex**, **Jellyfin**, and **Emby** streams via webhooks and [Tracearr](https://github.com/connorgallopo/Tracearr), instantly throttling qBittorrent and SABnzbd when someone hits play to ensure a buffer-free viewing experience.
+Throttlarr is an intelligent Python service that manages your download speeds and queue priorities. It monitors your **Plex**, **Jellyfin**, and **Emby** streams via webhooks and [Tracearr](https://github.com/connorgallopo/Tracearr), instantly throttling qBittorrent and SABnzbd when someone hits play to ensure a buffer-free viewing experience.
+
+Beyond basic throttling, Throttlarr features a **Balancing Engine** that acts as a traffic cop for your downloads, dynamically allocating bandwidth between download clients and reorganizing your queues so you get your media faster.
 
 > [!CAUTION]
 > This app was coded with the help of LLMs, I am not a professional coder. Don't trust the app to be safe enough to expose to the internet.
 
+---
+
 ## 🛠️ Features
 
-* **Instant Response:** Uses webhooks to throttle speeds the instant stream starts.
-* Periodically polls Tracearr to ensure speeds are only increased when we know nobody is watching.
-* **Scalable:** Supports 1, 2, or 100 media servers. If you have multiple Plex, Jellyfin, or Emby instances, Tracearr aggregates them all into one stream count.
+* **Instant Response:** Uses webhooks to throttle speeds when a stream starts.
+* **Smart Bandwidth Sharing:** Dynamically shares a single speed limit across SABnzbd and qBittorrent. The top-priority client gets the full pipeline, while the secondary client only gets the leftover idle bandwidth (choked down to 1 KB/s if necessary).
+* **Hybrid Queue Prioritization:** Automatically sorts your downloads to get you quick wins. TV Shows are downloaded linearly by Season/Episode. Movies are sorted by file size. Small movies jump to the front of the line; massive movies are pushed to the back until your TV queue finishes.
+* **qBittorrent Alt-Mode Synergy:** Respects your Upload limits. Throttlarr dynamically adjusts the internal download limits while using the "Alternative Speed Limits" toggle strictly as a visual indicator and upload throttle.
+* **Scalable:** Supports 1, 2, or 100 media servers. Tracearr aggregates all your instances into one stream count.
+
+---
 
 ## 📦 Deployment
 
@@ -33,8 +41,10 @@ services:
       # SABnzbd Config
       - SAB_HOST=sabnzbd:1337
       - SAB_API_KEY=${SAB_API_KEY}
-      - SAB_THROTTLE_SPEED=20M # Speed when watching (e.g., 20M)
-      - SAB_FULL_SPEED=0      # 0 = Unlimited
+      
+      # Shared Speed Limits (Applies to SABnzbd and qBittorrent combined)
+      - THROTTLE_SPEED=30M # Total shared network limit when streaming
+      - FULL_SPEED=0       # 0 = Unlimited
 
       # Tracearr Config
       - TRACEARR_URL=tracearr:3000
@@ -46,7 +56,7 @@ services:
 
 ```
 
-### Example [.env file](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/#use-the-env_file-attribute)
+### Example `.env` file
 
 ```ini
 # qBittorrent
@@ -68,13 +78,15 @@ docker compose up -d
 
 ```
 
+---
+
 ## 🔧 Configuration
 
 ### Webhooks (optional)
 
 Because Throttlarr relies on Tracearr to detect when streams *stop*, you only need to send webhooks when a stream *starts* or *resumes*.
 
-Point your media servers webhooks to the following endpoints:
+Point your media servers' webhooks to the following endpoints:
 
 * **Plex:** `http://throttlarr:5000/plex`
 * **Jellyfin:** `http://throttlarr:5000/jellyfin`
@@ -96,6 +108,7 @@ Point your media servers webhooks to the following endpoints:
 {
   "NotificationType": "{{NotificationType}}"
 }
+
 ```
 
 8. Save!
@@ -112,7 +125,7 @@ Point your media servers webhooks to the following endpoints:
 3. **URL:** `http://throttlarr:5000/emby`
 4. **Data Format:** `application/json`
 5. **Events:** Check **Playback Start** and **Playback Unpause**.
-6. Save! 
+6. Save!
 
 ---
 
