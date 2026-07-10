@@ -28,8 +28,20 @@ TRACEARR_TOKEN = os.getenv('TRACEARR_TOKEN', '')
 
 SAB_HOST = fix_url(os.getenv('SAB_HOST', 'sabnzbd:8080'))
 SAB_API_KEY = os.getenv('SAB_API_KEY', '')
-THROTTLE_SPEED = os.getenv('THROTTLE_SPEED', os.getenv('SAB_THROTTLE_SPEED', '20M'))
-FULL_SPEED = os.getenv('FULL_SPEED', os.getenv('SAB_FULL_SPEED', '0'))
+
+# --- MULTI-STAGE THROTTLE LIMITS ---
+FULL_SPEED = os.getenv('FULL_SPEED', '0')
+SOFT_THROTTLE_SPEED = os.getenv('SOFT_THROTTLE_SPEED', '30M')
+HARD_THROTTLE_SPEED = os.getenv('HARD_THROTTLE_SPEED', '5M')
+
+# Escalation Triggers
+try:
+    HARD_THROTTLE_STREAMS = int(os.getenv('HARD_THROTTLE_STREAMS', '2'))
+    # Bitrate threshold in Kbps (e.g., 20000 = 20 Mbps video)
+    HARD_THROTTLE_BITRATE = int(os.getenv('HARD_THROTTLE_BITRATE', '20000')) 
+except ValueError:
+    HARD_THROTTLE_STREAMS = 2
+    HARD_THROTTLE_BITRATE = 20000
 
 # Safely parse the sync interval (defaults to 300 seconds / 5 minutes)
 try:
@@ -42,11 +54,82 @@ except ValueError:
 MAX_RECENT_SECONDS = 60 * 60 * 2  # 2 hours
 
 # --- GLOBALS ---
-is_throttled = False
+throttle_level = 0  # 0 = Unthrottled, 1 = Soft Throttle, 2 = Hard Throttle
 historical_peak_speed = 0
 queue_lock = threading.Lock()
+last_applied_sab_limit = None
+last_applied_qbt_limit = None
+last_applied_qbt_mode = None
 
 # --- HELPERS ---
+def sab_sync_queue_order(managed_items):
+    if not SAB_API_KEY:
+        return
+
+    sab_items = [item for item in managed_items if item['source'] == 'sab']
+    if len(sab_items) <= 1:
+        return
+
+    # Check if SAB queue is already perfectly sorted
+    is_sorted = True
+    for i in range(len(sab_items) - 1):
+        p1 = sab_items[i].get('sab_pos', 99999)
+        p2 = sab_items[i+1].get('sab_pos', 99999)
+        
+        # If a higher priority item has a larger index (lower in queue), it's out of order
+        if p1 > p2:
+            is_sorted = False
+            break
+
+    if is_sorted:
+        return
+
+    try:
+        # Move items to position 0 in reverse order to stack them perfectly
+        for item in reversed(sab_items):
+            requests.get(
+                f"{SAB_HOST}/api",
+                params={'mode': 'switch', 'value': item['id'], 'value2': 0, 'apikey': SAB_API_KEY},
+                timeout=5
+            )
+    except Exception as exc:
+        print(f"[SAB] Failed to sync queue order: {exc}", flush=True)
+
+
+def qbt_sync_queue_order(managed_items):
+    qbt_items = [item for item in managed_items if item['source'] == 'qbit']
+    if len(qbt_items) <= 1:
+        return
+
+    # Check if qBT queue is already perfectly sorted to avoid API spam
+    is_sorted = True
+    for i in range(len(qbt_items) - 1):
+        pos1 = qbt_items[i].get('qbt_pos', -1)
+        pos2 = qbt_items[i+1].get('qbt_pos', -1)
+        
+        # Treat -1 (un-queued) as the absolute bottom of the list
+        p1 = 99999 if pos1 < 0 else pos1
+        p2 = 99999 if pos2 < 0 else pos2
+        
+        # If a higher priority item is lower in the actual client UI, it's out of order
+        if p1 >= p2:
+            is_sorted = False
+            break
+
+    if is_sorted:
+        return
+
+    try:
+        session = qbt_login_session()
+        # Send them to the top in reverse order so the #1 priority ends up at queue position 1
+        for item in reversed(qbt_items):
+            session.post(
+                f"{QBT_HOST}/api/v2/torrents/topPrio",
+                data={'hashes': item['id']},
+                timeout=5
+            )
+    except Exception as exc:
+        print(f"[QBT] Failed to sync queue order: {exc}", flush=True)
 
 def parse_size_to_bytes(value):
     if value is None:
@@ -94,22 +177,32 @@ def format_speed_limit_bytes(bytes_per_sec):
 def parse_priority(name):
     text = str(name).replace('_', ' ').replace('.', ' ').replace('-', ' ')
 
+    # 1. Standard S01E01 or S1E1 patterns
     match = re.search(r'[sS](\d{1,2})\s*[eE](\d{1,2})', text)
     if match:
         return int(match.group(1)), int(match.group(2)), 1
 
+    # 2. 1x01 or 01x01 patterns
     match = re.search(r'(\d{1,2})[xX](\d{1,2})', text)
     if match:
         return int(match.group(1)), int(match.group(2)), 1
 
+    # 3. Full "SEASON 1" text patterns
     match = re.search(r'SEASON\s*(\d{1,2})', text, re.IGNORECASE)
     if match:
         return int(match.group(1)), 0, 0
 
+    # 4. Standalone season packs (e.g., Silo.S01.2160p or Silo S1)
+    match = re.search(r'\b[sS](\d{1,2})\b', text)
+    if match:
+        return int(match.group(1)), 0, 0
+
+    # 5. "1 of 12" style patterns
     match = re.search(r'^(\d{1,2})\s*of\s*\d{1,2}', text, re.IGNORECASE)
     if match:
         return int(match.group(1)), 0, 0
 
+    # Fallback to movie classification
     return 999, 999, 2
 
 
@@ -179,10 +272,16 @@ def qbt_get_downloads():
         current_speed = int(torrent.get('dlspeed', 0) or 0)
         paused = state in {'pauseddl', 'stoppeddl'}
         
-        # NEW: Grab total size (in bytes)
+        # Define total_size and is_tv BEFORE the limbo check
         total_size = int(torrent.get('size', 0) or torrent.get('total_size', 0) or 0)
         season, episode, kind = parse_priority(name)
         is_tv = kind in (0, 1)
+        
+        # Extract the current qBittorrent queue position
+        try:
+            qbt_pos = int(torrent.get('priority', -1))
+        except (ValueError, TypeError):
+            qbt_pos = -1
 
         if now - added_on > MAX_RECENT_SECONDS:
             if paused:
@@ -196,6 +295,7 @@ def qbt_get_downloads():
                     'is_paused': True,
                     'total_size': total_size,
                     'is_tv': is_tv,
+                    'qbt_pos': qbt_pos,
                     'priority': (999, 999, 999, added_on),
                     'is_limbo': True
                 })
@@ -211,6 +311,7 @@ def qbt_get_downloads():
             'is_paused': paused,
             'total_size': total_size,
             'is_tv': is_tv,
+            'qbt_pos': qbt_pos,
             'priority': (season, episode, kind, added_on),
         })
     return downloads
@@ -244,7 +345,8 @@ def sab_get_downloads():
     downloads = []
     applied_global_speed = False
 
-    for slot in slots:
+    # Capture the physical queue position
+    for index, slot in enumerate(slots):
         status = str(slot.get('status', '')).lower()
         if status not in {'downloading', 'paused', 'queued'}:
             continue
@@ -256,7 +358,6 @@ def sab_get_downloads():
         name = slot.get('filename') or slot.get('nzo_name') or slot.get('name') or ''
         paused = status == 'paused'
         
-        # NEW: Convert SAB's MB to bytes
         try:
             total_size = int(float(slot.get('mb') or 0) * 1024 * 1024)
         except ValueError:
@@ -277,6 +378,7 @@ def sab_get_downloads():
                     'is_paused': True,
                     'total_size': total_size,
                     'is_tv': is_tv,
+                    'sab_pos': index,
                     'priority': (999, 999, 999, added_on),
                     'is_limbo': True
                 })
@@ -298,17 +400,21 @@ def sab_get_downloads():
             'is_paused': paused,
             'total_size': total_size,
             'is_tv': is_tv,
+            'sab_pos': index,
             'priority': (season, episode, kind, added_on),
         })
     return downloads
 
 
 def get_effective_total_speed():
-    throttle_bytes = parse_size_to_bytes(THROTTLE_SPEED)
+    soft_bytes = parse_size_to_bytes(SOFT_THROTTLE_SPEED)
+    hard_bytes = parse_size_to_bytes(HARD_THROTTLE_SPEED)
     full_bytes = parse_size_to_bytes(FULL_SPEED)
 
-    if is_throttled:
-        return float('inf') if throttle_bytes == 0 else throttle_bytes
+    if throttle_level == 2:
+        return float('inf') if hard_bytes == 0 else hard_bytes
+    elif throttle_level == 1:
+        return float('inf') if soft_bytes == 0 else soft_bytes
 
     if full_bytes > 0:
         return full_bytes
@@ -318,7 +424,10 @@ def get_effective_total_speed():
 
 def apply_rate_limits(total_speed_limit, current_qbt_speed, current_sab_speed, active_items):
     global historical_peak_speed
-    global is_throttled
+    global throttle_level
+    global last_applied_sab_limit
+    global last_applied_qbt_limit
+    global last_applied_qbt_mode
 
     sab_target = total_speed_limit
     qbt_target = total_speed_limit
@@ -338,49 +447,56 @@ def apply_rate_limits(total_speed_limit, current_qbt_speed, current_sab_speed, a
     # --- 1. APPLY SABNZBD LIMIT ---
     if SAB_API_KEY:
         target_speed_string = '0' if sab_target == float('inf') else format_speed_limit_bytes(sab_target)
-        try:
-            sab_url = f"{SAB_HOST}/api?mode=config&name=speedlimit&value={target_speed_string}&apikey={SAB_API_KEY}&output=json"
-            response = requests.get(sab_url, timeout=5)
-            if response.status_code == 200:
-                speed_str = "Unlimited" if target_speed_string == "0" else target_speed_string
-                print(f"[SUCCESS] SABnzbd limit set to: {speed_str}", flush=True)
-            else:
-                print(f"[ERROR] SABnzbd HTTP {response.status_code}: {response.text}", flush=True)
-        except Exception as exc:
-            print(f"[ERROR] Failed to communicate with SABnzbd: {exc}", flush=True)
+        
+        # Only push to SABnzbd if the limit has actually changed
+        if target_speed_string != last_applied_sab_limit:
+            try:
+                sab_url = f"{SAB_HOST}/api?mode=config&name=speedlimit&value={target_speed_string}&apikey={SAB_API_KEY}&output=json"
+                response = requests.get(sab_url, timeout=5)
+                if response.status_code == 200:
+                    speed_str = "Unlimited" if target_speed_string == "0" else target_speed_string
+                    print(f"[SUCCESS] SABnzbd limit set to: {speed_str}", flush=True)
+                    last_applied_sab_limit = target_speed_string  # Save the new state
+                else:
+                    print(f"[ERROR] SABnzbd HTTP {response.status_code}: {response.text}", flush=True)
+            except Exception as exc:
+                print(f"[ERROR] Failed to communicate with SABnzbd: {exc}", flush=True)
 
     # --- 2. APPLY QBITTORRENT LIMIT ---
     qbt_limit_bytes = -1 if qbt_target == float('inf') else int(qbt_target)
-    try:
-        session = qbt_login_session()
-        
-        # 1. Update BOTH regular and alt download limits to the dynamic value via Preferences
-        # This safely applies the math without destroying your custom upload limits
-        prefs_payload = {
-            "dl_limit": qbt_limit_bytes,
-            "alt_dl_limit": qbt_limit_bytes
-        }
-        
-        session.post(
-            f"{QBT_HOST}/api/v2/app/setPreferences",
-            data={'json': json.dumps(prefs_payload)},
-            timeout=5
-        )
-        
-        # 2. Toggle Alt-Speed mode based on throttle status
-        # FIX: Changed 'state' to 'mode' to properly trigger the QBT API
-        mode_val = 1 if is_throttled else 0
-        session.post(
-            f"{QBT_HOST}/api/v2/transfer/setSpeedLimitsMode",
-            data={'mode': mode_val},
-            timeout=5
-        )
-        
-        speed_str = "Unlimited" if qbt_limit_bytes == -1 else format_speed_limit_bytes(qbt_limit_bytes)
-        mode_str = "Alt Mode/Throttled" if is_throttled else "Regular Mode"
-        print(f"[SUCCESS] qBittorrent limit set to: {speed_str} ({mode_str})", flush=True)
-    except Exception as exc:
-        print(f"[ERROR] Failed to set qBittorrent speed limit: {exc}", flush=True)
+    mode_val = 1 if throttle_level > 0 else 0
+    
+    # Only push to qBittorrent if the limit OR the alt-mode state has changed
+    if qbt_limit_bytes != last_applied_qbt_limit or mode_val != last_applied_qbt_mode:
+        try:
+            session = qbt_login_session()
+            
+            prefs_payload = {
+                "dl_limit": qbt_limit_bytes,
+                "alt_dl_limit": qbt_limit_bytes
+            }
+            
+            session.post(
+                f"{QBT_HOST}/api/v2/app/setPreferences",
+                data={'json': json.dumps(prefs_payload)},
+                timeout=5
+            )
+            
+            session.post(
+                f"{QBT_HOST}/api/v2/transfer/setSpeedLimitsMode",
+                data={'mode': mode_val},
+                timeout=5
+            )
+            
+            speed_str = "Unlimited" if qbt_limit_bytes == -1 else format_speed_limit_bytes(qbt_limit_bytes)
+            mode_str = f"Alt Mode (Stage {throttle_level})" if throttle_level > 0 else "Regular Mode"
+            print(f"[SUCCESS] qBittorrent limit set to: {speed_str} ({mode_str})", flush=True)
+            
+            # Save the new states
+            last_applied_qbt_limit = qbt_limit_bytes
+            last_applied_qbt_mode = mode_val
+        except Exception as exc:
+            print(f"[ERROR] Failed to set qBittorrent speed limit: {exc}", flush=True)
 
 
 def qbt_toggle_torrents(active_hashes, all_items):
@@ -431,31 +547,6 @@ def qbt_toggle_torrents(active_hashes, all_items):
         print(f"[QBT] Failed to pause/resume torrents: {exc}", flush=True)
 
 
-def sab_toggle_torrents(active_ids, all_items):
-    if not SAB_API_KEY:
-        return
-
-    for item in all_items:
-        if item['source'] != 'sab':
-            continue
-
-        try:
-            if item['id'] in active_ids and item['is_paused']:
-                requests.get(
-                    f"{SAB_HOST}/api",
-                    params={'mode': 'resume', 'name': item['id'], 'apikey': SAB_API_KEY},
-                    timeout=10,
-                )
-            elif item['id'] not in active_ids and not item['is_paused']:
-                requests.get(
-                    f"{SAB_HOST}/api",
-                    params={'mode': 'pause', 'name': item['id'], 'apikey': SAB_API_KEY},
-                    timeout=10,
-                )
-        except Exception as exc:
-            print(f"[SAB] Failed to pause/resume {item['name']}: {exc}", flush=True)
-
-
 def rebalance_downloads():
     global historical_peak_speed
 
@@ -469,13 +560,13 @@ def rebalance_downloads():
         combined_current = qbt_current + sab_current
 
         # Update peak speed and determine current hard limits
-        if not is_throttled and parse_size_to_bytes(FULL_SPEED) == 0:
+        if throttle_level == 0 and parse_size_to_bytes(FULL_SPEED) == 0:
             historical_peak_speed = max(historical_peak_speed, combined_current)
             total_limit = float('inf')
         else:
             total_limit = get_effective_total_speed()
 
-        # NEW: If idle, preemptively apply limits to the clients so they are ready for new items, then exit.
+        # If idle, preemptively apply limits to the clients so they are ready for new items, then exit.
         if not all_items:
             apply_rate_limits(total_limit, 0, 0, [])
             return
@@ -501,6 +592,10 @@ def rebalance_downloads():
             managed_items = small_movies + tv_items + large_movies
         # ----------------------------------
 
+        # Physically stack the torrents and nzbs to match the Hybrid Logic
+        qbt_sync_queue_order(managed_items)
+        sab_sync_queue_order(managed_items)
+
         bandwidth_pool_baseline = historical_peak_speed if total_limit == float('inf') else total_limit
         HEALTHY_SPEED_THRESHOLD = 5 * 1024 * 1024  # 5 MB/s
 
@@ -523,7 +618,7 @@ def rebalance_downloads():
             tv_size_str = f"{total_tv_size / 1024:.2f} KB" if total_tv_size > 0 else "0 B"
 
         print("\n" + "="*50, flush=True)
-        print(f"[BALANCER RUN] Total Limit: {limit_str} | Throttled: {is_throttled}", flush=True)
+        print(f"[BALANCER RUN] Total Limit: {limit_str} | Throttle Stage: {throttle_level}", flush=True)
         print(f"[HYBRID LOGIC] TV Queue Weight: {tv_size_str}", flush=True)
         print("-" * 50, flush=True)
 
@@ -566,39 +661,39 @@ def rebalance_downloads():
         # --- END TELEMETRY ---
 
         active_qbt_hashes = {item['id'] for item in active_items if item['source'] == 'qbit'}
-        active_sab_ids = {item['id'] for item in active_items if item['source'] == 'sab'}
 
         for item in limbo_items:
             if item['source'] == 'qbit':
                 active_qbt_hashes.add(item['id'])
-            elif item['source'] == 'sab':
-                active_sab_ids.add(item['id'])
 
         apply_rate_limits(total_limit, qbt_current, sab_current, active_items)
         qbt_toggle_torrents(active_qbt_hashes, all_items)
-        sab_toggle_torrents(active_sab_ids, all_items)
 
 
 # --- CORE LOGIC ---
-def set_throttles(enable_throttle: bool, reason: str):
-    """Engages or releases throttles, preventing duplicate API calls."""
-    global is_throttled
+def set_throttles(level: int, reason: str):
+    """Engages or releases throttles based on multi-stage logic."""
+    global throttle_level
 
-    if enable_throttle == is_throttled:
+    # Don't downgrade a Hard Throttle (2) to a Soft Throttle (1) if webhooks fire during a heavy stream
+    if level == 1 and throttle_level == 2:
         return
 
-    is_throttled = enable_throttle
-    if is_throttled:
-        print(f"\n[ACTION] Engaging throttles! (Trigger: {reason})", flush=True)
-    else:
-        print(f"\n[ACTION] Releasing throttles (Full speed!). (Trigger: {reason})", flush=True)
+    if level == throttle_level:
+        return
 
-    # Defer entirely to the balancer engine so all API calls are centralized
+    throttle_level = level
+    if throttle_level == 2:
+        print(f"\n[ACTION] Engaging HARD Throttles! (Trigger: {reason})", flush=True)
+    elif throttle_level == 1:
+        print(f"\n[ACTION] Engaging SOFT Throttles. (Trigger: {reason})", flush=True)
+    else:
+        print(f"\n[ACTION] Releasing all throttles (Full speed!). (Trigger: {reason})", flush=True)
+
     rebalance_downloads()
 
 
 def sync_with_tracearr():
-    """Background thread that acts as source of truth and queue balancer."""
     if not TRACEARR_TOKEN:
         print("[TRACEARR] No API token provided. Background sync will still rebalance downloads.", flush=True)
 
@@ -611,16 +706,44 @@ def sync_with_tracearr():
                     'accept': 'application/json',
                     'Authorization': f'Bearer {TRACEARR_TOKEN}'
                 }
-                url = f"{TRACEARR_URL}/api/v1/public/streams?summary=true"
+                url = f"{TRACEARR_URL}/api/v1/public/streams"
                 response = requests.get(url, headers=headers, timeout=10)
 
                 if response.status_code == 200:
                     data = response.json()
-                    total_streams = data.get('summary', {}).get('total', 0)
+                    
+                    # Dig into the data list
+                    streams = data.get('data', [])
+                    total_streams = len(streams)
+                    max_bitrate_kbps = 0
+                    
+                    # Dig into the data list
+                    raw_streams = data.get('data', [])
+                    
+                    # NEW: Only count streams that are actually "playing"
+                    streams = [s for s in raw_streams if s.get('state') == 'playing']
+                    
+                    total_streams = len(streams)
+                    max_bitrate_kbps = 0
+                    
+                    for stream in streams:
+                        # Grab the raw integer bitrate (e.g., 4868)
+                        bitrate = stream.get('bitrate', 0)
+                        
+                        # Compare against our threshold (which is in Kbps)
+                        if bitrate > max_bitrate_kbps:
+                            max_bitrate_kbps = bitrate
+
+                    # Logic Matrix
                     if total_streams == 0:
-                        set_throttles(False, reason="Tracearr reports 0 streams")
+                        set_throttles(0, reason="Tracearr reports 0 streams")
+                    elif total_streams >= HARD_THROTTLE_STREAMS:
+                        set_throttles(2, reason=f"Stream count reached {total_streams}")
+                    elif max_bitrate_kbps >= HARD_THROTTLE_BITRATE:
+                        set_throttles(2, reason=f"High bitrate detected ({max_bitrate_kbps} Kbps)")
                     else:
-                        set_throttles(True, reason=f"Tracearr reports {total_streams} streams")
+                        set_throttles(1, reason=f"Active stream ({max_bitrate_kbps} Kbps)")
+                        
                 else:
                     print(f"[TRACEARR SYNC] Error HTTP {response.status_code}: {response.text}", flush=True)
             except Exception as exc:
@@ -628,7 +751,6 @@ def sync_with_tracearr():
 
         rebalance_downloads()
         time.sleep(TRACEARR_SYNC_INTERVAL)
-
 
 # --- WEBHOOK ENDPOINTS ---
 @app.route('/plex', methods=['POST'])
@@ -641,7 +763,7 @@ def plex_webhook():
         data = json.loads(payload)
         event = data.get('event')
         if event in ['media.play', 'media.resume']:
-            set_throttles(True, reason=f"Plex Webhook ({event})")
+            set_throttles(1, reason=f"Plex Webhook ({event})")
     except Exception as exc:
         print(f"[PLEX ERROR] Failed to parse payload: {exc}", flush=True)
 
@@ -656,7 +778,7 @@ def jellyfin_webhook():
 
     event = data.get('NotificationType')
     if event in ['PlaybackStart', 'PlaybackUnpause']:
-        set_throttles(True, reason=f"Jellyfin Webhook ({event})")
+        set_throttles(1, reason=f"Jellyfin Webhook ({event})")
 
     return "OK", 200
 
@@ -669,7 +791,7 @@ def emby_webhook():
 
     event = data.get('Event')
     if event in ['playback.start', 'playback.unpause']:
-        set_throttles(True, reason=f"Emby Webhook ({event})")
+        set_throttles(1, reason=f"Emby Webhook ({event})")
 
     return "OK", 200
 
@@ -680,8 +802,16 @@ def start_background_threads():
     thread = threading.Thread(target=sync_with_tracearr, daemon=True)
     thread.start()
 
+# Check if Flask's double-booting development reloader is active
+is_flask_reloader = os.environ.get('FLASK_DEBUG') == '1' or os.environ.get('FLASK_ENV') == 'development'
 
-start_background_threads()
+if is_flask_reloader:
+    # If in dev mode, strictly limit the background thread to the worker process
+    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        start_background_threads()
+else:
+    # If running normally in Docker/Production, start it immediately
+    start_background_threads()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
