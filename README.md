@@ -11,10 +11,12 @@ Beyond basic throttling, Throttlarr features a **Balancing Engine** that acts as
 
 ## 🛠️ Features
 
-* **Instant Response:** Uses webhooks to throttle speeds when a stream starts.
+* **Multi-Stage Throttling:** Automatically switches between `FULL_SPEED`, `SOFT_THROTTLE_SPEED`, and `HARD_THROTTLE_SPEED`. It steps down to a soft throttle for normal viewing and escalates to a hard throttle if stream counts or bitrates exceed your desired limit.
+* **Instant Response:** Uses webhooks from your media server to instantly engage throttles the second a stream starts or resumes.
+* **Smart Tracearr Polling:** Connects to Tracearr to monitor actively "playing" streams in the background, validating active stream counts and analyzing bitrates to release or escalate throttles automatically.
 * **Smart Bandwidth Sharing:** Dynamically shares a single speed limit across SABnzbd and qBittorrent. The top-priority client gets the full pipeline, while the secondary client only gets the leftover idle bandwidth (choked down to 1 KB/s if necessary).
-* **Hybrid Queue Prioritization:** Automatically sorts your downloads to get you quick wins. TV Shows are downloaded linearly by Season/Episode. Movies are sorted by file size. Small movies jump to the front of the line; massive movies are pushed to the back until your TV queue finishes.
-* **qBittorrent Alt-Mode Synergy:** Respects your Upload limits. Throttlarr dynamically adjusts the internal download limits while using the "Alternative Speed Limits" toggle strictly as a visual indicator and upload throttle.
+* **Hybrid Queue Prioritization:** Automatically sorts your downloads to get you quick fullfillment. TV Shows are downloaded linearly by Season/Episode. Movies are sorted by file size. Small movies jump to the front of the line; massive movies are pushed to the back until your TV queue finishes.
+* **qBittorrent Synergy:** Respects your Upload limits. Throttlarr dynamically adjusts the internal download limits while using the "Alternative Speed Limits" toggle strictly as a visual indicator and upload throttle. *Now supports automatic endpoint switching for both qBittorrent v4.x and v5.0+.*
 * **Scalable:** Supports 1, 2, or 100 media servers. Tracearr aggregates all your instances into one stream count.
 
 ---
@@ -42,14 +44,19 @@ services:
       - SAB_HOST=sabnzbd:1337
       - SAB_API_KEY=${SAB_API_KEY}
       
-      # Shared Speed Limits (Applies to SABnzbd and qBittorrent combined)
-      - THROTTLE_SPEED=30M # Total shared network limit when streaming
-      - FULL_SPEED=0       # 0 = Unlimited
+      # Multi-Stage Speed Limits (Applies to SABnzbd and qBittorrent combined)
+      - FULL_SPEED=0                 # 0 = Unlimited
+      - SOFT_THROTTLE_SPEED=45M      # Soft limit when a standard stream starts (e.g., 30M = 30 Megabytes/s)
+      - HARD_THROTTLE_SPEED=25M      # Escalated limit for heavy streaming loads
+      
+      # Escalation Triggers
+      - HARD_THROTTLE_STREAMS=3      # Engage hard throttle if this many active streams are playing
+      - HARD_THROTTLE_BITRATE=50000  # Engage hard throttle if a single stream exceeds this bitrate (in Kbps, e.g., 50000 = 50 Mbps video)
 
       # Tracearr Config
       - TRACEARR_URL=tracearr:3000
       - TRACEARR_TOKEN=${TRACEARR_API_KEY}
-      - TRACEARR_SYNC_INTERVAL=300 # How often to poll Tracearr in seconds (default: 300, 5 minutes)
+      - TRACEARR_SYNC_INTERVAL=20    # How often to poll Tracearr and adjust download queue in seconds
     depends_on:
       tracearr:
         condition: service_healthy
@@ -82,9 +89,9 @@ docker compose up -d
 
 ## 🔧 Configuration
 
-### Webhooks (optional)
+### Webhooks (optional but recommended for instant response)
 
-Because Throttlarr relies on Tracearr to detect when streams *stop*, you only need to send webhooks when a stream *starts* or *resumes*.
+Because Throttlarr relies on Tracearr's background polling to detect when streams *stop* or change bitrates, you only need to send webhooks when a stream *starts* or *resumes* to guarantee instant soft throttling.
 
 Point your media servers' webhooks to the following endpoints:
 
@@ -147,4 +154,8 @@ Point your media servers' webhooks to the following endpoints:
 > 2. Switch to **Advanced View** (top right corner).
 > 3. Add `sabnzbd` to the **Host Whitelist** field and save. It should look like `sabnzbd.example.com, sabnzbd`.
 > 
->
+> 
+
+```
+
+```
