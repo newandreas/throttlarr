@@ -17,8 +17,12 @@ services:
       - SAB_API_KEY=${SAB_API_KEY}
       
       # Shared Speed Limits (Applies to SABnzbd and qBittorrent combined)
-      - THROTTLE_SPEED=30M # Total shared network limit when streaming
-      - FULL_SPEED=0       # 0 = Unlimited
+      - FULL_SPEED=0                # 0 = Unlimited
+      - SOFT_THROTTLE_SPEED=45M     # 45M is 45 megabytes per second
+      - HARD_THROTTLE_SPEED=25M
+      - HARD_THROTTLE_STREAMS=3     # When three streams are detected in Tracearr it will hard throttle
+      - HARD_THROTTLE_BITRATE=50000 # If a single stream exceeds this bitrate in kilobits per second it will hard throttle
+      - TRACEARR_SYNC_INTERVAL=20   # How many seconds between tracearr polls and download queue adjustments
 
       # Tracearr Config
       - TRACEARR_URL=tracearr:3000
