@@ -156,6 +156,3 @@ Point your media servers' webhooks to the following endpoints:
 > 
 > 
 
-```
-
-```
