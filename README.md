@@ -33,8 +33,8 @@ services:
       # SABnzbd Config
       - SAB_HOST=sabnzbd:1337
       - SAB_API_KEY=${SAB_API_KEY}
-      - SAB_THROTTLE_SPEED=20M # Speed when watching (e.g., 20M)
-      - SAB_FULL_SPEED=0      # 0 = Unlimited
+      - THROTTLE_SPEED=20M # Speed when watching (e.g., 20M)
+      - FULL_SPEED=0      # 0 = Unlimited
 
       # Tracearr Config
       - TRACEARR_URL=tracearr:3000

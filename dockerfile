@@ -2,7 +2,7 @@ FROM python:alpine
 WORKDIR /app
 
 # Added gunicorn to the requirements
-RUN pip install --no-cache-dir flask qbittorrent-api requests gunicorn
+RUN pip install --no-cache-dir flask requests gunicorn
 
 COPY app.py /app/app.py
 
