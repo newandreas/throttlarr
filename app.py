@@ -78,6 +78,7 @@ active_prefetch_shows = set()
 last_prefetch_check = 0
 qbt_intended_states = {}
 qbt_manual_overrides = set()
+qbt_manual_pauses = set()
 
 # Helper functions live here. Most of the service logic is intentionally small and data-driven
 # so the balancing loop can stay deterministic and easier to reason about.
@@ -311,7 +312,7 @@ def qbt_login_session():
 
 
 def qbt_get_downloads():
-    global qbt_intended_states, qbt_manual_overrides
+    global qbt_intended_states, qbt_manual_overrides, qbt_manual_pauses
     try:
         session = qbt_login_session()
         response = session.get(f"{QBT_HOST}/api/v2/torrents/info?filter=all", timeout=10)
@@ -343,10 +344,22 @@ def qbt_get_downloads():
                 # The app paused this torrent but it is now running again. Treat that as a
                 # manual override and stop fighting the user's action.
                 qbt_manual_overrides.add(hash_id)
+                qbt_manual_pauses.discard(hash_id)
             elif not intended_paused and paused:
-                # The app resumed this torrent but it was manually paused again. That should not
-                # be treated as a new automation decision.
+                # The user paused this torrent after the app left it running. Keep it in the
+                # normal queue, but do not resume it automatically.
+                qbt_manual_pauses.add(hash_id)
                 qbt_manual_overrides.discard(hash_id)
+            elif not paused and hash_id in qbt_manual_pauses:
+                # The user resumed a manually paused torrent. It returns to the normal queue.
+                qbt_manual_pauses.discard(hash_id)
+        elif paused:
+            # A paused torrent with no state recorded by this process was paused manually (or
+            # before a restart). Do not resume it until the user changes its state.
+            qbt_manual_pauses.add(hash_id)
+        elif hash_id in qbt_manual_pauses:
+            # A manually paused torrent was resumed by the user. It returns to the normal queue.
+            qbt_manual_pauses.discard(hash_id)
 
         total_size = int(torrent.get('size', 0) or torrent.get('total_size', 0) or 0)
         season, episode, kind = parse_priority(name)
@@ -371,7 +384,8 @@ def qbt_get_downloads():
             'is_tv': is_tv,
             'qbt_pos': qbt_pos,
             'priority': (season, episode, kind, added_on),
-            'is_manual_override': hash_id in qbt_manual_overrides
+            'is_manual_override': hash_id in qbt_manual_overrides,
+            'is_manual_pause': hash_id in qbt_manual_pauses
         }
         item['remaining_bytes'] = max(0, item['total_size'] - item['completed_bytes']) if item['total_size'] > 0 else None
 
@@ -573,7 +587,7 @@ def qbt_toggle_torrents(active_hashes, all_items):
 
     try:
         pause_hash_list = [item['id'] for item in all_items if item['source'] == 'qbit' and item['id'] not in active_hashes and not item['is_paused']]
-        resume_hash_list = [item['id'] for item in all_items if item['source'] == 'qbit' and item['id'] in active_hashes and item['is_paused']]
+        resume_hash_list = [item['id'] for item in all_items if item['source'] == 'qbit' and item['id'] in active_hashes and item['is_paused'] and not item.get('is_manual_override') and not item.get('is_manual_pause')]
 
         if pause_hash_list:
             resp = session.post(f"{QBT_HOST}/api/v2/torrents/stop", data={'hashes': '|'.join(pause_hash_list)}, timeout=10)
