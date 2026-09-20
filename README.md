@@ -5,6 +5,8 @@ Throttlarr is a Python service that manages download bandwidth for qBittorrent a
 > [!CAUTION]
 > This app was coded with the help of LLMs, I am not a professional coder. Don't trust the app to be safe enough to expose to the internet.
 
+---
+
 ## 🛠️ Features
 
 * **Instant Response:** Uses media-server webhooks to start soft throttling the moment playback begins.
@@ -63,7 +65,7 @@ services:
 
 ```
 
-### Example [.env file](https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/#use-the-env_file-attribute)
+### Example `.env` file
 
 ```ini
 # qBittorrent
@@ -85,6 +87,8 @@ docker compose up -d
 
 ```
 
+---
+
 ## 🔧 Configuration
 
 ### Queue priority and override behavior
@@ -99,9 +103,9 @@ Throttlarr does not just set a global limit; it also reorders the queue to favor
 
 ### Webhooks (optional)
 
-Because Throttlarr relies on Tracearr to detect when streams *stop*, you only need to send webhooks when a stream *starts* or *resumes*.
+Because Throttlarr relies on Tracearr's background polling to detect when streams *stop* or change bitrates, you only need to send webhooks when a stream *starts* or *resumes* to guarantee instant soft throttling.
 
-Point your media servers webhooks to the following endpoints:
+Point your media servers' webhooks to the following endpoints:
 
 * **Plex:** `http://throttlarr:5000/plex`
 * **Jellyfin:** `http://throttlarr:5000/jellyfin`
@@ -123,6 +127,7 @@ Point your media servers webhooks to the following endpoints:
 {
   "NotificationType": "{{NotificationType}}"
 }
+
 ```
 
 8. Save!
@@ -139,7 +144,7 @@ Point your media servers webhooks to the following endpoints:
 3. **URL:** `http://throttlarr:5000/emby`
 4. **Data Format:** `application/json`
 5. **Events:** Check **Playback Start** and **Playback Unpause**.
-6. Save! 
+6. Save!
 
 ---
 
@@ -161,4 +166,5 @@ Point your media servers webhooks to the following endpoints:
 > 2. Switch to **Advanced View** (top right corner).
 > 3. Add `sabnzbd` to the **Host Whitelist** field and save. It should look like `sabnzbd.example.com, sabnzbd`.
 > 
->
+> 
+

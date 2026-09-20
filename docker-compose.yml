@@ -3,7 +3,7 @@ services:
     image: ghcr.io/newandreas/throttlarr:latest
     container_name: throttlarr
     restart: unless-stopped
-    # Use internal docker networking (no ports exposed) if Plex/Jellyfin are in the same network
+    # Use internal docker networking (no ports exposed) if Plex/Jellyfin/Emby are in the same network
     # ports:
     #   - "5000:5000" 
     environment:

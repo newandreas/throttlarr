@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 import json
 import os
 import re
+import re
 import requests
 import threading
 import time
@@ -23,8 +24,8 @@ def fix_url(url):
 # Runtime configuration pulled from env. The defaults are tuned for the Docker compose
 # layout used by this project so the service can boot with minimal setup.
 QBT_HOST = fix_url(os.getenv('QB_HOST', 'torrent:8080'))
-QBT_USER = os.getenv('QB_USER', 'Andreas')
-QBT_PASS = os.getenv('QB_PASS', 'redacted')
+QBT_USER = os.getenv('QB_USER', 'user')
+QBT_PASS = os.getenv('QB_PASS', 'password')
 
 TRACEARR_URL = fix_url(os.getenv('TRACEARR_URL', 'tracearr:3000'))
 TRACEARR_TOKEN = os.getenv('TRACEARR_TOKEN', '')
@@ -684,7 +685,10 @@ def sync_with_tracearr():
     if not TRACEARR_TOKEN:
         print("[TRACEARR] No API token provided. Background sync will still rebalance downloads.", flush=True)
 
+        print("[TRACEARR] No API token provided. Background sync will still rebalance downloads.", flush=True)
+
     print(f"[TRACEARR] Background sync started. Polling every {TRACEARR_SYNC_INTERVAL} seconds.", flush=True)
+
 
     while True:
         if TRACEARR_TOKEN:
@@ -730,6 +734,7 @@ def plex_webhook():
     except Exception: pass
     return "OK", 200
 
+
 @app.route('/jellyfin', methods=['POST'])
 def jellyfin_webhook():
     data = request.get_json(force=True, silent=True)
@@ -737,6 +742,7 @@ def jellyfin_webhook():
     event = data.get('NotificationType')
     if event in ['PlaybackStart', 'PlaybackUnpause']: set_throttles(1, reason=f"Jellyfin Webhook ({event})")
     return "OK", 200
+
 
 @app.route('/emby', methods=['POST'])
 def emby_webhook():
