@@ -373,6 +373,7 @@ def qbt_get_downloads():
             'priority': (season, episode, kind, added_on),
             'is_manual_override': hash_id in qbt_manual_overrides
         }
+        item['remaining_bytes'] = max(0, item['total_size'] - item['completed_bytes']) if item['total_size'] > 0 else None
 
         if now - added_on > MAX_RECENT_SECONDS:
             if paused and not item['is_manual_override']:
@@ -459,6 +460,7 @@ def sab_get_downloads():
             'priority': (season, episode, kind, added_on),
             'is_manual_override': str(slot.get('priority', '0')) == '2'
         }
+        item['remaining_bytes'] = max(0, total_size - item['completed_bytes']) if total_size > 0 else None
 
         if now - added_on > MAX_RECENT_SECONDS and paused:
             item['is_limbo'] = True
@@ -478,6 +480,7 @@ def serialize_download_item(item):
         'queue_position': item.get('qbt_pos', item.get('sab_pos')),
         'size_bytes': item.get('total_size', 0),
         'completed_bytes': item.get('completed_bytes', 0),
+        'remaining_bytes': item.get('remaining_bytes'),
         'speed_bytes': item.get('current_speed', 0),
         'eta_seconds': item.get('eta_seconds'),
         'paused': item.get('is_paused', False),
@@ -500,6 +503,13 @@ def get_effective_total_speed():
         return full_bytes
 
     return historical_peak_speed or float('inf')
+
+
+def completion_sort_key(item):
+    total_size = item.get('total_size', 0)
+    completed_bytes = item.get('completed_bytes', 0)
+    completion_ratio = completed_bytes / total_size if total_size > 0 else 0
+    return (-completion_ratio, item.get('remaining_bytes', float('inf')), item['priority'])
 
 
 def apply_rate_limits(total_speed_limit, current_qbt_speed, current_sab_speed, active_items):
@@ -626,23 +636,27 @@ def rebalance_downloads():
         # traffic, and finally movies. This preserves the queue semantics while still letting
         # the active recordings dominate the bandwidth pool.
         manual_items = [item for item in managed_items if item.get('is_manual_override')]
-        prefetch_items = [item for item in managed_items if item.get('is_prefetch') and not item.get('is_manual_override')]
-        tv_items = [item for item in managed_items if item.get('is_tv') and not item.get('is_prefetch') and not item.get('is_manual_override')]
-        movie_items = [item for item in managed_items if not item.get('is_tv') and not item.get('is_manual_override')]
+        in_progress_items = [item for item in managed_items if item.get('completed_bytes', 0) > 0 and not item.get('is_manual_override')]
+        new_items = [item for item in managed_items if item.get('completed_bytes', 0) <= 0 and not item.get('is_manual_override')]
+        in_progress_items.sort(key=completion_sort_key)
+
+        prefetch_items = [item for item in new_items if item.get('is_prefetch')]
+        tv_items = [item for item in new_items if item.get('is_tv') and not item.get('is_prefetch')]
+        movie_items = [item for item in new_items if not item.get('is_tv')]
 
         manual_items.sort(key=lambda item: item['priority'])
         prefetch_items.sort(key=lambda item: item['priority'])
         tv_items.sort(key=lambda item: item['priority'])
         movie_items.sort(key=lambda item: item.get('total_size', 0))
 
-        total_tv_size = sum(item.get('total_size', 0) for item in tv_items) + sum(item.get('total_size', 0) for item in prefetch_items) + sum(item.get('total_size', 0) for item in manual_items)
+        total_tv_size = sum(item.get('total_size', 0) for item in tv_items) + sum(item.get('total_size', 0) for item in prefetch_items) + sum(item.get('total_size', 0) for item in manual_items) + sum(item.get('total_size', 0) for item in in_progress_items if item.get('is_tv'))
 
         if total_tv_size == 0 and not manual_items:
-            managed_items = movie_items
+            managed_items = in_progress_items + movie_items
         else:
             small_movies = [m for m in movie_items if m.get('total_size', 0) < total_tv_size]
             large_movies = [m for m in movie_items if m.get('total_size', 0) >= total_tv_size]
-            managed_items = manual_items + prefetch_items + small_movies + tv_items + large_movies
+            managed_items = manual_items + in_progress_items + prefetch_items + small_movies + tv_items + large_movies
 
         qbt_sync_queue_order(managed_items)
         sab_sync_queue_order(managed_items)
