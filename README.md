@@ -1,14 +1,18 @@
 # Throttlarr
 
-Throttlarr is a Python service that manages your download speeds. It monitors your **Plex**, **Jellyfin**, and **Emby** streams via webhooks and [Tracearr](https://github.com/connorgallopo/Tracearr), instantly throttling qBittorrent and SABnzbd when someone hits play to ensure a buffer-free viewing experience.
+Throttlarr is a Python service that manages download bandwidth for qBittorrent and SABnzbd. It watches **Plex**, **Jellyfin**, and **Emby** activity through webhooks and [Tracearr](https://github.com/connorgallopo/Tracearr), then adjusts the queue and speed limits so active streams keep buffer-free playback while background downloads stay under control.
 
 > [!CAUTION]
 > This app was coded with the help of LLMs, I am not a professional coder. Don't trust the app to be safe enough to expose to the internet.
 
 ## 🛠️ Features
 
-* **Instant Response:** Uses webhooks to throttle speeds the instant stream starts.
-* Periodically polls Tracearr to ensure speeds are only increased when we know nobody is watching.
+* **Instant Response:** Uses media-server webhooks to start soft throttling the moment playback begins.
+* **Tracearr Sync:** Polls Tracearr on a configurable interval so throttling stays in sync with active streams, even when a webhook is missed.
+* **Prefetcharr Priority:** Scans recent Prefetcharr logs and promotes matching titles to the front of the queue when they look like the next thing a user is about to watch.
+* **Manual Override Detection:** Tracks qBittorrent state changes so manual resume/pause actions are recognized and not fought by automation.
+* **Hybrid Queue Logic:** Keeps a priority-aware ordering across TV, prefetch items, manual overrides, and regular downloads instead of treating the queue as a flat list.
+* **SABnzbd Awareness:** Ignores stale SAB entries and manual pause states so the balancer does not interfere with user-driven downloads.
 * **Scalable:** Supports 1, 2, or 100 media servers. If you have multiple Plex, Jellyfin, or Emby instances, Tracearr aggregates them all into one stream count.
 
 ## 📦 Deployment
@@ -21,7 +25,7 @@ services:
     image: ghcr.io/newandreas/throttlarr:latest
     container_name: throttlarr
     restart: unless-stopped
-    # Use internal docker networking (no ports exposed) if Plex/Jellyfin/Emby are in the same network
+    # Use internal docker networking (no ports exposed) if Plex/Jellyfin are in the same network
     # ports:
     #   - "5000:5000" 
     environment:
@@ -33,13 +37,26 @@ services:
       # SABnzbd Config
       - SAB_HOST=sabnzbd:1337
       - SAB_API_KEY=${SAB_API_KEY}
-      - THROTTLE_SPEED=20M # Speed when watching (e.g., 20M)
-      - FULL_SPEED=0      # 0 = Unlimited
 
       # Tracearr Config
       - TRACEARR_URL=tracearr:3000
       - TRACEARR_TOKEN=${TRACEARR_API_KEY}
-      - TRACEARR_SYNC_INTERVAL=300 # How often to poll Tracearr in seconds (default: 300, 5 minutes)
+      - TRACEARR_SYNC_INTERVAL=300 # How often to poll Tracearr in seconds (default: 300)
+
+      # Multi-Stage Speed Limits
+      - FULL_SPEED=0              # Max bandwidth when idle (0 = unlimited)
+      - SOFT_THROTTLE_SPEED=45M   # Speed limit for standard streams
+      - HARD_THROTTLE_SPEED=30M   # Speed limit for heavy network loads
+      
+      # Escalation Triggers
+      - HARD_THROTTLE_STREAMS=4   # Number of concurrent streams to trigger a Hard Throttle
+      - HARD_THROTTLE_BITRATE=40000 # Bitrate in Kbps to trigger a Hard Throttle (e.g., 40000 = 40 Mbps)
+      
+      # Prefetcharr VIP Integration
+      - PREFETCHARR_LOGS_DIR=/prefetcharr_logs
+    volumes:
+      # Mount the parent prefetcharr log directory as Read-Only to enable VIP queue priority
+      - /opt/appdata/prefetcharr/logs:/prefetcharr_logs:ro
     depends_on:
       tracearr:
         condition: service_healthy
@@ -69,6 +86,16 @@ docker compose up -d
 ```
 
 ## 🔧 Configuration
+
+### Queue priority and override behavior
+
+Throttlarr does not just set a global limit; it also reorders the queue to favor what matters most:
+
+* **Prefetcharr VIP priority:** Recent Prefetcharr log titles are matched against the current download names. If a show is actively being prefetched or watched soon, matching torrents are promoted higher in the queue.
+* **Manual override detection:** qBittorrent state is tracked so when a user resumes a torrent that the app paused, or pauses one the app resumed, that action is treated as a manual override and left alone.
+* **Season pack ordering:** Individual episodes still sort ahead of full season packs, which helps avoid massive season bundles stealing priority from the next episode a user wants to watch.
+* **Tracearr filtering:** Paused streams are ignored when deriving the throttling state, so the app does not overreact to non-playing media.
+* **SABnzbd handling:** Old or manually paused SAB downloads are ignored instead of being treated as active queue items.
 
 ### Webhooks (optional)
 
