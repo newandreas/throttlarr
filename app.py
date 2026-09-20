@@ -1,6 +1,7 @@
-from flask import Flask, request
+from flask import Flask, jsonify, request
 from datetime import datetime, timezone, timedelta
 import json
+import hmac
 import os
 import re
 import re
@@ -32,6 +33,7 @@ TRACEARR_TOKEN = os.getenv('TRACEARR_TOKEN', '')
 
 SAB_HOST = fix_url(os.getenv('SAB_HOST', 'sabnzbd:8080'))
 SAB_API_KEY = os.getenv('SAB_API_KEY', '')
+THROTTLARR_API_TOKEN = os.getenv('THROTTLARR_API_TOKEN', '')
 
 # Speed settings are staged so the app can react to media playback without forcing a
 # full stop in the queue. 0 means "unlimited" for the relevant mode.
@@ -272,6 +274,25 @@ def parse_sab_added(slot):
     return None
 
 
+def parse_duration_seconds(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {'-', 'n/a', 'infinite', '∞'}:
+        return None
+    parts = text.split(':')
+    try:
+        if len(parts) == 3:
+            hours, minutes, seconds = [int(float(part)) for part in parts]
+            return hours * 3600 + minutes * 60 + seconds
+        if len(parts) == 2:
+            minutes, seconds = [int(float(part)) for part in parts]
+            return minutes * 60 + seconds
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
 def qbt_login_session():
     session = requests.Session()
     try:
@@ -343,6 +364,8 @@ def qbt_get_downloads():
             'added_on': added_on,
             'state': state,
             'current_speed': 0 if paused else current_speed,
+            'completed_bytes': int(torrent.get('completed', 0) or 0),
+            'eta_seconds': int(torrent.get('eta', 0) or 0) if torrent.get('eta') is not None else None,
             'is_paused': paused,
             'total_size': total_size,
             'is_tv': is_tv,
@@ -405,6 +428,11 @@ def sab_get_downloads():
             total_size = int(float(slot.get('mb') or 0) * 1024 * 1024)
         except ValueError:
             total_size = 0
+
+        try:
+            remaining_bytes = int(float(slot.get('mbleft') or 0) * 1024 * 1024)
+        except (TypeError, ValueError):
+            remaining_bytes = 0
             
         season, episode, kind = parse_priority(name)
         is_tv = kind in (0, 1)
@@ -422,6 +450,8 @@ def sab_get_downloads():
             'added_on': added_on,
             'state': status,
             'current_speed': current_speed,
+            'completed_bytes': max(0, total_size - remaining_bytes),
+            'eta_seconds': parse_duration_seconds(slot.get('timeleft') or slot.get('eta')),
             'is_paused': False,
             'total_size': total_size,
             'is_tv': is_tv,
@@ -436,6 +466,24 @@ def sab_get_downloads():
 
         downloads.append(item)
     return downloads
+
+
+def serialize_download_item(item):
+    return {
+        'source': item.get('source'),
+        'id': item.get('id'),
+        'name': item.get('name'),
+        'state': item.get('state'),
+        'added_at': item.get('added_on'),
+        'queue_position': item.get('qbt_pos', item.get('sab_pos')),
+        'size_bytes': item.get('total_size', 0),
+        'completed_bytes': item.get('completed_bytes', 0),
+        'speed_bytes': item.get('current_speed', 0),
+        'eta_seconds': item.get('eta_seconds'),
+        'paused': item.get('is_paused', False),
+        'is_tv': item.get('is_tv', False),
+        'is_prefetch': item.get('is_prefetch', False),
+    }
 
 
 def get_effective_total_speed():
@@ -720,6 +768,25 @@ def sync_with_tracearr():
 
         rebalance_downloads()
         time.sleep(TRACEARR_SYNC_INTERVAL)
+
+
+@app.route('/api/downloads', methods=['GET'])
+def downloads_api():
+    """Return read-only normalized queue state for internal consumers."""
+    if not THROTTLARR_API_TOKEN:
+        return jsonify({'error': 'endpoint token is not configured'}), 503
+
+    supplied_token = request.headers.get('X-Throttlarr-Token', '')
+    if not hmac.compare_digest(supplied_token, THROTTLARR_API_TOKEN):
+        return jsonify({'error': 'unauthorized'}), 401
+
+    with queue_lock:
+        downloads = qbt_get_downloads() + sab_get_downloads()
+
+    return jsonify({
+        'updated_at': int(time.time()),
+        'downloads': [serialize_download_item(item) for item in downloads]
+    })
 
 
 # Media server webhooks are the fast path for "the user is actively watching" signals.
