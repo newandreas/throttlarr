@@ -335,30 +335,28 @@ def qbt_get_downloads():
         paused = state in {'pauseddl', 'stoppeddl'}
         hash_id = torrent.get('hash', '')
         
-        # Track manual qBittorrent changes so we only keep overriding the torrent when the
-        # user is still behaving like a normal automation user rather than manually changing
-        # the torrent state outside of the balancer.
+        # Track manual qBittorrent changes with a 45-second grace period to allow 
+        # for slow disk cache flushes on massive 4K files.
         if hash_id in qbt_intended_states:
-            intended_paused = qbt_intended_states[hash_id]
-            if intended_paused and not paused:
-                # The app paused this torrent but it is now running again. Treat that as a
-                # manual override and stop fighting the user's action.
-                qbt_manual_overrides.add(hash_id)
-                qbt_manual_pauses.discard(hash_id)
-            elif not intended_paused and paused:
-                # The user paused this torrent after the app left it running. Keep it in the
-                # normal queue, but do not resume it automatically.
-                qbt_manual_pauses.add(hash_id)
-                qbt_manual_overrides.discard(hash_id)
-            elif not paused and hash_id in qbt_manual_pauses:
-                # The user resumed a manually paused torrent. It returns to the normal queue.
-                qbt_manual_pauses.discard(hash_id)
-        elif paused:
-            # A paused torrent with no state recorded by this process was paused manually (or
-            # before a restart). Do not resume it until the user changes its state.
-            qbt_manual_pauses.add(hash_id)
+            state_data = qbt_intended_states[hash_id]
+            
+            # Handle hot-reloads cleanly
+            if not isinstance(state_data, dict):
+                state_data = {'paused': state_data, 'time': 0}
+                qbt_intended_states[hash_id] = state_data
+                
+            intended_paused = state_data['paused']
+            
+            if now - state_data['time'] > 45:
+                if intended_paused and not paused:
+                    qbt_manual_overrides.add(hash_id)
+                    qbt_manual_pauses.discard(hash_id)
+                elif not intended_paused and paused:
+                    qbt_manual_pauses.add(hash_id)
+                    qbt_manual_overrides.discard(hash_id)
+                elif not paused and hash_id in qbt_manual_pauses:
+                    qbt_manual_pauses.discard(hash_id)
         elif hash_id in qbt_manual_pauses:
-            # A manually paused torrent was resumed by the user. It returns to the normal queue.
             qbt_manual_pauses.discard(hash_id)
 
         total_size = int(torrent.get('size', 0) or torrent.get('total_size', 0) or 0)
@@ -389,13 +387,24 @@ def qbt_get_downloads():
         }
         item['remaining_bytes'] = max(0, item['total_size'] - item['completed_bytes']) if item['total_size'] > 0 else None
 
+        # --- FIX: Updated API endpoints for Rescue block ---
         if now - added_on > MAX_RECENT_SECONDS:
-            if paused and not item['is_manual_override']:
-                item['is_limbo'] = True
-                item['priority'] = (999, 999, 999, added_on)
-                downloads.append(item)
-            continue
-        
+            qbt_intended_states.pop(hash_id, None)
+            qbt_manual_overrides.discard(hash_id)
+            
+            if paused:
+                if hash_id not in qbt_manual_pauses:
+                    try:
+                        resp = session.post(f"{QBT_HOST}/api/v2/torrents/start", data={'hashes': hash_id}, timeout=5)
+                        if resp.status_code == 404:
+                            session.post(f"{QBT_HOST}/api/v2/torrents/resume", data={'hashes': hash_id}, timeout=5)
+                        print(f" [🚀 RESCUE] Releasing aged-out torrent to qBittorrent: {name}", flush=True)
+                    except Exception:
+                        pass
+            
+            qbt_manual_pauses.discard(hash_id)
+            continue 
+
         downloads.append(item)
     return downloads
 
@@ -476,13 +485,11 @@ def sab_get_downloads():
         }
         item['remaining_bytes'] = max(0, total_size - item['completed_bytes']) if total_size > 0 else None
 
-        if now - added_on > MAX_RECENT_SECONDS and paused:
-            item['is_limbo'] = True
-            item['priority'] = (999, 999, 999, added_on)
+        if now - added_on > MAX_RECENT_SECONDS:
+            continue # SABnzbd items just drop off the radar
 
         downloads.append(item)
     return downloads
-
 
 def serialize_download_item(item):
     return {
@@ -519,7 +526,13 @@ def get_effective_total_speed():
     return historical_peak_speed or float('inf')
 
 
-def completion_sort_key(item):
+def tv_priority_sort_key(item):
+    # Prioritize lower season numbers first, then higher completion ratio, then smaller remaining bytes, then original priority tuple.
+    total_size = item.get('total_size', 0)
+    completed_bytes = item.get('completed_bytes', 0)
+    completion_ratio = completed_bytes / total_size if total_size > 0 else 0
+    season = item.get('priority', (float('inf'),))[0]
+    return (season, -completion_ratio, item.get('remaining_bytes', float('inf')), item.get('priority'))
     total_size = item.get('total_size', 0)
     completed_bytes = item.get('completed_bytes', 0)
     completion_ratio = completed_bytes / total_size if total_size > 0 else 0
@@ -602,9 +615,16 @@ def qbt_toggle_torrents(active_hashes, all_items):
         print(f"[QBT] Failed to pause/resume torrents: {exc}", flush=True)
 
     global qbt_intended_states
+    now_time = time.time()
     for item in all_items:
         if item['source'] == 'qbit':
-            qbt_intended_states[item['id']] = item['id'] not in active_hashes
+            h = item['id']
+            want_paused = h not in active_hashes
+            
+            # Only update the timestamp if Throttlarr is actively changing its mind,
+            # ensuring the 45-second grace period isn't infinitely reset.
+            if h not in qbt_intended_states or not isinstance(qbt_intended_states[h], dict) or qbt_intended_states[h]['paused'] != want_paused:
+                qbt_intended_states[h] = {'paused': want_paused, 'time': now_time}
 
 def rebalance_downloads():
     global historical_peak_speed
@@ -631,8 +651,9 @@ def rebalance_downloads():
             apply_rate_limits(total_limit, 0, 0, [])
             return
 
-        limbo_items = [item for item in all_items if item.get('is_limbo')]
-        managed_items = [item for item in all_items if not item.get('is_limbo')]
+        managed_items = all_items
+        limbo_items = [item for item in all_items if item.get('is_limbo')] # <-- DELETE THIS LINE
+
 
         # Prefetcharr is treated as a soft priority signal, not a hard requirement. If the
         # matching title appears in an active recent log, we boost it over generic TV entries.
@@ -650,9 +671,48 @@ def rebalance_downloads():
         # traffic, and finally movies. This preserves the queue semantics while still letting
         # the active recordings dominate the bandwidth pool.
         manual_items = [item for item in managed_items if item.get('is_manual_override')]
-        in_progress_items = [item for item in managed_items if item.get('completed_bytes', 0) > 0 and not item.get('is_manual_override')]
-        new_items = [item for item in managed_items if item.get('completed_bytes', 0) <= 0 and not item.get('is_manual_override')]
-        in_progress_items.sort(key=completion_sort_key)
+        
+        # 1. Find the smallest remaining size among active single episodes to use as a benchmark
+        single_eps = [i for i in managed_items if i.get('is_tv') and i['priority'][1] < 999 and not i.get('is_manual_override')]
+        min_ep_rem = min([i.get('remaining_bytes') if i.get('remaining_bytes') is not None else float('inf') for i in single_eps]) if single_eps else float('inf')
+
+        # 1b. Build a mapping of minimum remaining bytes per season for episodes
+        season_min_rem = {}
+        for ep in single_eps:
+            season = ep['priority'][0]
+            rem = ep.get('remaining_bytes') if ep.get('remaining_bytes') is not None else float('inf')
+            if season not in season_min_rem or rem < season_min_rem[season]:
+                season_min_rem[season] = rem
+
+        # 2. Build in-progress and new item lists, dynamically demoting massive season packs.
+        # For a season pack we compare its remaining size against the smallest remaining
+        # size of episodes from the next two seasons (e.g., for a S01 pack we compare to
+        # episodes from S02 and S03). This mirrors the desired behaviour of preferring
+        # later‑season episodes over a large multi‑season pack unless the pack itself is
+        # smaller.
+        in_progress_items = []
+        new_items = []
+        
+        for item in managed_items:
+            if item.get('is_manual_override'):
+                continue
+                
+            if item.get('completed_bytes', 0) > 0:
+                is_season = item.get('is_tv') and item['priority'][1] == 999
+                rem_bytes = item.get('remaining_bytes') if item.get('remaining_bytes') is not None else float('inf')
+                
+                if is_season:
+                    pack_season = item['priority'][0]
+                    next_seasons = [pack_season + 1, pack_season + 2]
+                    benchmark = min([season_min_rem.get(s, float('inf')) for s in next_seasons] + [min_ep_rem])
+                    if rem_bytes > benchmark:
+                        new_items.append(item)
+                        continue
+                in_progress_items.append(item)
+            else:
+                new_items.append(item)
+
+        in_progress_items.sort(key=tv_priority_sort_key)
 
         prefetch_items = [item for item in new_items if item.get('is_prefetch')]
         tv_items = [item for item in new_items if item.get('is_tv') and not item.get('is_prefetch')]
@@ -660,7 +720,7 @@ def rebalance_downloads():
 
         manual_items.sort(key=lambda item: item['priority'])
         prefetch_items.sort(key=lambda item: item['priority'])
-        tv_items.sort(key=lambda item: item['priority'])
+        tv_items.sort(key=tv_priority_sort_key)
         movie_items.sort(key=lambda item: item.get('total_size', 0))
 
         total_tv_size = sum(item.get('total_size', 0) for item in tv_items) + sum(item.get('total_size', 0) for item in prefetch_items) + sum(item.get('total_size', 0) for item in manual_items) + sum(item.get('total_size', 0) for item in in_progress_items if item.get('is_tv'))
@@ -693,47 +753,50 @@ def rebalance_downloads():
         print(f"[HYBRID LOGIC] TV Queue Weight: {tv_size_str}", flush=True)
         print("-" * 50, flush=True)
 
-        for item in limbo_items:
-            print(f" [✓ RESCUED] (Expired Limbo)        | Speed:   N/A | {item['name']}", flush=True)
-
         for item in managed_items:
             speed_str = format_speed_limit_bytes(item['current_speed'] or 0)
+            tag = " ✋ " if item.get('is_manual_override') else " 🚀 " if item.get('is_prefetch') else "    "
             
-            # Dynamic Tagging
-            if item.get('is_manual_override'):
-                tag = " ✋ "
-            elif item.get('is_prefetch'):
-                tag = " 🚀 "
-            else:
-                tag = "    "
-            
+            # 1. Catch Manual Pauses First (Removes them from the "Top Priority" illusion)
+            if item.get('is_manual_pause'):
+                print(f" [⏸  MANUAL PAUSE]      {tag}| {item['name']}", flush=True)
+                continue  # Skip adding to active_items so it doesn't take up the slot
+
+            # 2. Top Priority Active
             if not active_items:
-                print(f" [✓ ACTIVE] (Top Priority){tag}| Speed: {speed_str:>5} | {item['name']}", flush=True)
+                print(f" [▶  ACTIVE] (Top Prio) {tag}| Speed: {speed_str:>5} | {item['name']}", flush=True)
                 active_items.append(item)
                 active_bytes += item['current_speed'] or 0
-                if item['source'] == 'sab':
-                    has_active_sab = True
+                if item['source'] == 'sab': has_active_sab = True
+            
+            # 3. SABnzbd Internal Queueing
             elif item['source'] == 'sab' and has_active_sab:
-                print(f" [✓ QUEUED] (SAB Internal){tag}| Speed: {speed_str:>5} | {item['name']}", flush=True)
+                print(f" [⏳ QUEUED] (SAB Int)  {tag}| Speed: {speed_str:>5} | {item['name']}", flush=True)
                 active_items.append(item)
                 active_bytes += item['current_speed'] or 0
+            
+            # 4. Throttlarr Auto-Pauses (Bandwidth / Queue Health limits)
             elif total_limit != float('inf') and active_bytes >= total_limit:
-                print(f" [⏸ PAUSED] (Bandwidth Cap){tag}| {item['name']}", flush=True)
+                print(f" [⏸  AUTO-PAUSED] (Cap) {tag}| {item['name']}", flush=True)
             elif active_bytes >= HEALTHY_SPEED_THRESHOLD:
-                print(f" [⏸ PAUSED] (Queue Healthy){tag}| {item['name']}", flush=True)
+                print(f" [⏸  AUTO-PAUSED] (Hlth){tag}| {item['name']}", flush=True)
+            
+            # 5. Filling Idle Bandwidth
             else:
-                print(f" [✓ ACTIVE] (Filling Idle) {tag}| Speed: {speed_str:>5} | {item['name']}", flush=True)
+                print(f" [▶  ACTIVE] (Fill)     {tag}| Speed: {speed_str:>5} | {item['name']}", flush=True)
                 active_items.append(item)
                 active_bytes += item['current_speed'] or 0
-                if item['source'] == 'sab':
-                    has_active_sab = True
+                if item['source'] == 'sab': has_active_sab = True
 
         print("="*50 + "\n", flush=True)
 
         active_qbt_hashes = {item['id'] for item in active_items if item['source'] == 'qbit'}
+        
+        # --- DELETE THESE 3 LINES ---
         for item in limbo_items:
             if item['source'] == 'qbit':
                 active_qbt_hashes.add(item['id'])
+        # ----------------------------
 
         apply_rate_limits(total_limit, qbt_current, sab_current, active_items)
         qbt_toggle_torrents(active_qbt_hashes, all_items)
