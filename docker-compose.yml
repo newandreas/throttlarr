@@ -19,7 +19,7 @@ services:
       # Tracearr Config
       - TRACEARR_URL=tracearr:3000
       - TRACEARR_TOKEN=${TRACEARR_API_KEY}
-      - TRACEARR_SYNC_INTERVAL=300 # How often to poll Tracearr in seconds (default: 300)
+      - TRACEARR_SYNC_INTERVAL=20 # How often to poll Tracearr in seconds (default: 20)
 
       # Multi-Stage Speed Limits
       - FULL_SPEED=0              # Max bandwidth when idle (0 = unlimited)
@@ -32,6 +32,8 @@ services:
       
       # Prefetcharr VIP Integration
       - PREFETCHARR_LOGS_DIR=/prefetcharr_logs
+      - QUEUE_DIAGNOSTICS=0 # Set to 1 for up to 12 ranked rows with titles per rebalance
+      - TZ=${TZ:-UTC}
     volumes:
       # Mount the parent prefetcharr log directory as Read-Only to enable VIP queue priority
       - /opt/appdata/prefetcharr/logs:/prefetcharr_logs:ro

@@ -11,8 +11,8 @@ Throttlarr is a Python service that manages download bandwidth for qBittorrent a
 
 * **Instant Response:** Uses media-server webhooks to start soft throttling the moment playback begins.
 * **Tracearr Sync:** Polls Tracearr on a configurable interval so throttling stays in sync with active streams, even when a webhook is missed.
-* **Prefetcharr Priority:** Scans recent Prefetcharr logs and promotes matching titles to the front of the queue when they look like the next thing a user is about to watch.
-* **Manual Override Detection:** Tracks qBittorrent state changes so manual resume/pause actions are recognized and not fought by automation.
+* **Prefetcharr Priority:** Scans recent Prefetcharr logs and prioritizes matching episodes from the trigger episode onward, plus later seasons.
+* **Manual Override Detection:** Gives manually resumed downloads highest priority and excludes manually paused downloads from automation.
 * **Hybrid Queue Logic:** Keeps a priority-aware ordering across TV, prefetch items, manual overrides, and regular downloads instead of treating the queue as a flat list.
 * **SABnzbd Awareness:** Ignores stale SAB entries and manual pause states so the balancer does not interfere with user-driven downloads.
 * **Scalable:** Supports 1, 2, or 100 media servers. If you have multiple Plex, Jellyfin, or Emby instances, Tracearr aggregates them all into one stream count.
@@ -56,6 +56,7 @@ services:
       
       # Prefetcharr VIP Integration
       - PREFETCHARR_LOGS_DIR=/prefetcharr_logs
+      - QUEUE_DIAGNOSTICS=0 # Set to 1 for up to 12 ranked rows with titles per rebalance
     volumes:
       # Mount the parent prefetcharr log directory as Read-Only to enable VIP queue priority
       - /opt/appdata/prefetcharr/logs:/prefetcharr_logs:ro
@@ -93,13 +94,41 @@ docker compose up -d
 
 ### Queue priority and override behavior
 
-Throttlarr does not just set a global limit; it also reorders the queue to favor what matters most:
+Completed and stale downloads are excluded from automatic ranking. Manually
+paused downloads are excluded and never auto-resumed. Remaining downloads
+follow these priority tiers, from highest to lowest:
 
-* **Prefetcharr VIP priority:** Recent Prefetcharr log titles are matched against the current download names. If a show is actively being prefetched or watched soon, matching torrents are promoted higher in the queue.
-* **Manual override detection:** qBittorrent state is tracked so when a user resumes a torrent that the app paused, or pauses one the app resumed, that action is treated as a manual override and left alone.
-* **Season pack ordering:** Individual episodes still sort ahead of full season packs, which helps avoid massive season bundles stealing priority from the next episode a user wants to watch.
-* **Tracearr filtering:** Paused streams are ignored when deriving the throttling state, so the app does not overreact to non-playing media.
-* **SABnzbd handling:** Old or manually paused SAB downloads are ignored instead of being treated as active queue items.
+See the [download queue priority policy](docs/queue-priority.md) for the
+full rules and development guidance.
+
+1. **Manual resume:** A download manually resumed by the user gets the highest priority.
+2. **Prefetcharr targets:** Matching titles in the trigger season and later seasons outrank normal downloads. In the trigger season, episodes before the trigger episode do not qualify. Unknown trigger season or episode values broaden the match. Matching episodes sort ahead of season packs, and targeted downloads keep this priority while in progress.
+3. **Early finish:** A waiting movie may move ahead of normal in-progress work when its full size is smaller than the top-ranked normal download's remaining bytes. A waiting TV episode uses the same comparison against the top-ranked normal in-progress TV episode. Neither promotion jumps ahead of manual resumes or Prefetcharr targets.
+4. **Other in-progress downloads:** The smallest remaining amount comes first.
+5. **Normal TV episodes:** Newer seasons come first, then earlier episodes within each season. Individual episodes sort before season packs.
+6. **Other waiting movies:** These follow normal TV and sort smaller first.
+7. **Ties:** Queue age, source, then ID make equal-priority ordering deterministic.
+
+Priority describes precedence, not predicted completion time. Throttlarr
+coordinates an aggregate speed limit across qBittorrent and SABnzbd, lets
+available capacity cascade to lower-ranked work, and synchronizes the ranked
+order to qBittorrent. SABnzbd still schedules within its own queue, and actual
+per-download speeds vary.
+
+### Troubleshooting logs
+
+Each rebalance logs a UTC summary with the throttle stage, observed speeds,
+queue counts, top item ID, and requested SABnzbd/qBittorrent limits. For a
+temporary ranked-item trace, set `QUEUE_DIAGNOSTICS=1`, restart Throttlarr,
+reproduce the behavior, then collect recent logs with:
+
+```bash
+docker compose logs --since 15m throttlarr
+```
+
+Diagnostic rows include download titles and are limited to 12 per rebalance.
+Review logs before sharing them; known credentials and common authentication
+query parameters are redacted, but logs can still contain private metadata.
 
 ### Webhooks (optional)
 

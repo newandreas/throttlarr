@@ -1,1 +1,34 @@
-*.pyc
+# Environment files may contain credentials. Keep examples and templates trackable.
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Python environments and generated files.
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build and test artifacts.
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local Docker Compose configuration.
+docker-compose.override.yml
+docker-compose.override.yaml
+
+# Local VS Code preferences and workspace files.
+.vscode/settings.json
+*.code-workspace
+
+# Operating-system clutter.
+.DS_Store
+Thumbs.db
