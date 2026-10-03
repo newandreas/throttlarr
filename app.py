@@ -379,6 +379,8 @@ def qbt_get_downloads():
         
         # Track manual qBittorrent changes with a 45-second grace period to allow 
         # for slow disk cache flushes on massive 4K files.
+        # Track manual qBittorrent changes with a 45-second grace period to allow 
+        # for slow disk cache flushes on massive 4K files.
         if hash_id in qbt_intended_states:
             state_data = qbt_intended_states[hash_id]
             
@@ -537,6 +539,8 @@ def sab_get_downloads():
         }
         item['remaining_bytes'] = max(0, total_size - item['completed_bytes']) if total_size > 0 else None
 
+        if now - added_on > MAX_RECENT_SECONDS:
+            continue # SABnzbd items just drop off the radar
         if now - added_on > MAX_RECENT_SECONDS:
             continue # SABnzbd items just drop off the radar
 
@@ -764,6 +768,7 @@ def qbt_toggle_torrents(active_hashes, all_items):
         log_error('[QBT] Failed to pause/resume torrents', exc)
 
     global qbt_intended_states
+    now_time = time.time()
     now_time = time.time()
     for item in all_items:
         if item['source'] == 'qbit':
