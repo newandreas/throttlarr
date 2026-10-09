@@ -106,6 +106,17 @@ last_prefetch_check = 0
 qbt_intended_states = {}
 qbt_manual_overrides = set()
 qbt_manual_pauses = set()
+SAB_PROBE_SAMPLE_COUNT = 4
+SAB_PROBE_SAMPLE_INTERVAL_SECONDS = 15
+SAB_PROBE_COOLDOWN_SECONDS = 15 * 60
+SAB_PROBE_QBT_LIMIT = 1024 * 1024
+SAB_PROBE_MIN_GAIN = 2 * 1024 * 1024
+SAB_PROBE_MIN_GAIN_RATIO = 0.10
+sab_probe_state = {
+    'phase': 'cooldown',
+    'samples': [],
+    'cooldown_until': time.time() + SAB_PROBE_COOLDOWN_SECONDS,
+}
 
 # Helper functions live here. Most of the service logic is intentionally small and data-driven
 # so the balancing loop can stay deterministic and easier to reason about.
@@ -264,6 +275,130 @@ def format_speed_limit_bytes(bytes_per_sec):
         return f"{megabytes:.2f}".rstrip('0').rstrip('.') + "M"
     kilobytes = bytes_per_sec / 1024
     return f"{kilobytes:.2f}".rstrip('0').rstrip('.') + "K"
+
+
+def reset_sab_probe():
+    sab_probe_state.clear()
+    sab_probe_state.update({
+        'phase': 'idle',
+        'samples': [],
+        'cooldown_until': 0,
+    })
+
+
+def update_sab_speed_probe(qbt_speed, sab_speed, sab_active, qbt_active, priority_source, now=None):
+    now = time.time() if now is None else now
+    phase = sab_probe_state['phase']
+
+    if not sab_active:
+        if phase != 'idle':
+            log_message('INFO', '[SAB-PROBE] SAB queue inactive; restoring normal qBittorrent allocation')
+            reset_sab_probe()
+        return None
+
+    if phase == 'confirmed':
+        if not qbt_active or priority_source != 'sab':
+            log_message('INFO', '[SAB-PROBE] Eligibility ended; restoring normal qBittorrent allocation')
+            sab_probe_state.update({
+                'phase': 'cooldown',
+                'samples': [],
+                'cooldown_until': now + SAB_PROBE_COOLDOWN_SECONDS,
+            })
+            return None
+        return SAB_PROBE_QBT_LIMIT
+
+    eligible = qbt_active and priority_source == 'sab'
+    if phase in {'baseline', 'probe', 'verify'} and not eligible:
+        log_message('INFO', '[SAB-PROBE] Trial interrupted; restoring normal qBittorrent allocation')
+        sab_probe_state.update({
+            'phase': 'cooldown',
+            'samples': [],
+            'cooldown_until': now + SAB_PROBE_COOLDOWN_SECONDS,
+        })
+        return None
+
+    if not eligible:
+        return None
+
+    if phase == 'cooldown' and now < sab_probe_state['cooldown_until']:
+        return None
+
+    if phase in {'idle', 'cooldown'}:
+        if qbt_speed <= 0 or sab_speed <= 0:
+            return None
+        sab_probe_state.update({
+            'phase': 'baseline',
+            'samples': [],
+            'cooldown_until': 0,
+            'baseline_speed': None,
+            'probe_speed': None,
+        })
+        log_message('INFO', '[SAB-PROBE] Starting baseline measurement')
+        phase = 'baseline'
+
+    last_sample_at = sab_probe_state.get('last_sample_at')
+    if last_sample_at is not None and now - last_sample_at < SAB_PROBE_SAMPLE_INTERVAL_SECONDS:
+        return SAB_PROBE_QBT_LIMIT if phase == 'probe' else None
+
+    sab_probe_state['last_sample_at'] = now
+    sab_probe_state['samples'].append(max(0, sab_speed))
+    if len(sab_probe_state['samples']) < SAB_PROBE_SAMPLE_COUNT:
+        return SAB_PROBE_QBT_LIMIT if phase == 'probe' else None
+
+    average_speed = sum(sab_probe_state['samples']) / len(sab_probe_state['samples'])
+    if phase == 'baseline':
+        sab_probe_state.update({
+            'phase': 'probe',
+            'samples': [],
+            'baseline_speed': average_speed,
+        })
+        log_message(
+            'INFO',
+            f'[SAB-PROBE] Baseline={format_speed_limit_bytes(average_speed)}/s; '
+            f'testing qBittorrent at {format_speed_limit_bytes(SAB_PROBE_QBT_LIMIT)}/s',
+        )
+        return SAB_PROBE_QBT_LIMIT
+
+    if phase == 'probe':
+        sab_probe_state.update({
+            'phase': 'verify',
+            'samples': [],
+            'probe_speed': average_speed,
+        })
+        log_message(
+            'INFO',
+            f'[SAB-PROBE] Test={format_speed_limit_bytes(average_speed)}/s; '
+            'restoring normal qBittorrent allocation for verification',
+        )
+        return None
+
+    baseline_speed = sab_probe_state['baseline_speed']
+    probe_speed = sab_probe_state['probe_speed']
+    required_gain = max(SAB_PROBE_MIN_GAIN, baseline_speed * SAB_PROBE_MIN_GAIN_RATIO)
+    improved = probe_speed - max(baseline_speed, average_speed) >= required_gain
+
+    if improved:
+        sab_probe_state.update({'phase': 'confirmed', 'samples': []})
+        log_message(
+            'INFO',
+            f'[SAB-PROBE] Benefit confirmed; retaining qBittorrent cap at '
+            f'{format_speed_limit_bytes(SAB_PROBE_QBT_LIMIT)}/s while SAB remains active',
+        )
+        return SAB_PROBE_QBT_LIMIT
+
+    sab_probe_state.update({
+        'phase': 'cooldown',
+        'samples': [],
+        'cooldown_until': now + SAB_PROBE_COOLDOWN_SECONDS,
+    })
+    log_message(
+        'INFO',
+        f'[SAB-PROBE] No sustained benefit; baseline={format_speed_limit_bytes(baseline_speed)}/s '
+        f'test={format_speed_limit_bytes(probe_speed)}/s '
+        f'verify={format_speed_limit_bytes(average_speed)}/s; normal allocation restored',
+    )
+    return None
+
 
 def parse_priority(name):
     text = str(name).replace('_', ' ').replace('.', ' ').replace('-', ' ')
@@ -669,7 +804,7 @@ def queue_priority_order(items, now=None):
     return manual + prefetch + promoted + in_progress + waiting_tv + waiting_movies
 
 
-def apply_rate_limits(total_speed_limit, current_qbt_speed, current_sab_speed, active_items):
+def apply_rate_limits(total_speed_limit, current_qbt_speed, current_sab_speed, active_items, qbt_limit_override=None):
     global historical_peak_speed, throttle_level
     global last_applied_sab_limit, last_applied_qbt_limit, last_applied_qbt_mode
 
@@ -686,6 +821,9 @@ def apply_rate_limits(total_speed_limit, current_qbt_speed, current_sab_speed, a
         elif top_source == 'qbit':
             qbt_target = total_speed_limit
             sab_target = max(pool - current_qbt_speed, 1024)
+
+    if qbt_limit_override is not None:
+        qbt_target = min(qbt_target, qbt_limit_override)
 
     sab_target_log = 'unlimited' if sab_target == float('inf') else f'{format_speed_limit_bytes(sab_target)}/s'
     qbt_target_log = 'unlimited' if qbt_target == float('inf') else f'{format_speed_limit_bytes(qbt_target)}/s'
@@ -805,7 +943,8 @@ def rebalance_downloads():
             total_limit = get_effective_total_speed()
 
         if not all_items:
-            apply_rate_limits(total_limit, 0, 0, [])
+            update_sab_speed_probe(0, 0, False, False, None)
+            apply_rate_limits(total_limit, 0, 0, [], qbt_limit_override=None)
             limit_str = 'unlimited' if total_limit == float('inf') else f'{format_speed_limit_bytes(total_limit)}/s'
             log_message(
                 'INFO',
@@ -937,7 +1076,34 @@ def rebalance_downloads():
 
         active_qbt_hashes = {item['id'] for item in active_items if item['source'] == 'qbit'}
 
-        apply_rate_limits(total_limit, qbt_current, sab_current, active_items)
+        sab_active = any(
+            item['source'] == 'sab' and item['state'] == 'downloading' and not item['is_paused']
+            for item in sab_items
+        )
+        qbt_active = (
+            not any(item.get('is_manual_override') for item in qbt_items)
+            and any(
+                item['source'] == 'qbit'
+                and item['state'] in {'downloading', 'forceddl'}
+                and not item['is_paused']
+                for item in qbt_items
+            )
+        )
+        priority_source = active_items[0]['source'] if active_items else None
+        qbt_limit_override = update_sab_speed_probe(
+            qbt_current,
+            sab_current,
+            sab_active,
+            qbt_active,
+            priority_source,
+        )
+        apply_rate_limits(
+            total_limit,
+            qbt_current,
+            sab_current,
+            active_items,
+            qbt_limit_override=qbt_limit_override,
+        )
         qbt_toggle_torrents(active_qbt_hashes, all_items)
 
 

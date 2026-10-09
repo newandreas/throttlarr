@@ -65,6 +65,17 @@ separately across SABnzbd and qBittorrent:
 - Treat limits and queue positions as coordination signals, not precise
    per-download speed guarantees. Actual throughput varies, so re-evaluate the
    active queue and client limits as downloads progress.
+- When SABnzbd is the highest-ranked active client and both clients are
+   downloading, periodically run a bounded throughput probe: compare four
+   rebalance samples at the normal qBittorrent allocation, four samples with
+   qBittorrent capped at 1 MiB/s, and four samples after restoring its normal
+   allocation. Samples must be at least 15 seconds apart. Keep the probe cap
+   while SABnzbd remains active only when the test average beats both surrounding
+   averages by at least 2 MiB/s and 10% of the baseline. Otherwise restore
+   normal allocation and wait 15 minutes before retrying. Apply the same
+   cooldown after service startup so a restart cannot immediately retrigger a
+   probe. Abort and restore normal allocation if the eligibility conditions
+   change. Never probe when a manual-resume override is active.
 
 ## Implementation and Tests
 

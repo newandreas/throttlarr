@@ -15,6 +15,7 @@ Throttlarr is a Python service that manages download bandwidth for qBittorrent a
 * **Manual Override Detection:** Gives manually resumed downloads highest priority and excludes manually paused downloads from automation.
 * **Hybrid Queue Logic:** Keeps a priority-aware ordering across TV, prefetch items, manual overrides, and regular downloads instead of treating the queue as a flat list.
 * **SABnzbd Awareness:** Ignores stale SAB entries and manual pause states so the balancer does not interfere with user-driven downloads.
+* **SAB Throughput Probe:** When SABnzbd has priority, briefly reduces qBittorrent speed and compares before/during/after SAB rates. It retains the lower qBittorrent cap only when the sustained SAB improvement is confirmed.
 * **Scalable:** Supports 1, 2, or 100 media servers. If you have multiple Plex, Jellyfin, or Emby instances, Tracearr aggregates them all into one stream count.
 
 ## 📦 Deployment
@@ -113,7 +114,15 @@ Priority describes precedence, not predicted completion time. Throttlarr
 coordinates an aggregate speed limit across qBittorrent and SABnzbd, lets
 available capacity cascade to lower-ranked work, and synchronizes the ranked
 order to qBittorrent. SABnzbd still schedules within its own queue, and actual
-per-download speeds vary.
+per-download speeds vary. When SABnzbd is first and both clients are active,
+Throttlarr also performs a bounded production probe: four samples each at
+normal allocation, a 1 MiB/s qBittorrent cap, and restored normal allocation.
+Samples are at least 15 seconds apart. If SABnzbd is at least 2 MiB/s and 10%
+faster than both surrounding averages, the lower qBittorrent cap remains until
+SABnzbd becomes inactive; otherwise, normal allocation resumes and another
+probe waits 15 minutes. The same cooldown applies after service startup. A
+probe is aborted if SABnzbd loses priority, either client becomes inactive, or
+a manual qBittorrent-resume override is active.
 
 ### Troubleshooting logs
 
@@ -196,4 +205,3 @@ Point your media servers' webhooks to the following endpoints:
 > 3. Add `sabnzbd` to the **Host Whitelist** field and save. It should look like `sabnzbd.example.com, sabnzbd`.
 > 
 > 
-
