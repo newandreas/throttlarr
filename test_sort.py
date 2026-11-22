@@ -89,20 +89,40 @@ class QueuePriorityTests(unittest.TestCase):
                 self.assertEqual(app.active_prefetch_shows, {"my show": (2, 7)})
 
     def test_prefetch_trigger_matches_season_and_episode_boundaries(self):
-        pre_trigger = make_item("My Show S02E03", season=2, episode=3, is_tv=True)
-        trigger_episode = make_item("My Show S02E04", season=2, episode=4, is_tv=True)
+        episode_one = make_item("My Show S02E01", season=2, episode=1, is_tv=True)
+        episode_two = make_item("My Show S02E02", season=2, episode=2, is_tv=True)
+        later_episode = make_item("My Show S02E04", season=2, episode=4, is_tv=True)
         later_season = make_item("My Show S03E01", season=3, episode=1, is_tv=True)
         season_pack = make_item("My Show S02", season=2, episode=999, is_tv=True)
         other_show = make_item("Other Show S02E04", season=2, episode=4, is_tv=True)
 
         trigger = {"my show": (2, 4)}
-        self.assertFalse(app.is_prefetch_target(pre_trigger, trigger))
-        self.assertTrue(app.is_prefetch_target(trigger_episode, trigger))
-        self.assertTrue(app.is_prefetch_target(later_season, trigger))
+        self.assertTrue(app.is_prefetch_target(episode_one, trigger))
+        self.assertTrue(app.is_prefetch_target(episode_two, trigger))
+        self.assertFalse(app.is_prefetch_target(later_episode, trigger))
+        self.assertFalse(app.is_prefetch_target(later_season, trigger))
         self.assertTrue(app.is_prefetch_target(season_pack, trigger))
         self.assertFalse(app.is_prefetch_target(other_show, trigger))
-        self.assertTrue(app.is_prefetch_target(pre_trigger, {"my show": (None, 4)}))
-        self.assertTrue(app.is_prefetch_target(pre_trigger, {"my show": (2, None)}))
+        self.assertTrue(app.is_prefetch_target(episode_one, {"my show": (None, 4)}))
+        self.assertTrue(app.is_prefetch_target(episode_two, {"my show": (2, None)}))
+        self.assertFalse(app.is_prefetch_target(later_episode, {"my show": (None, 4)}))
+
+    def test_prefetch_season_ranks_episode_one_episode_two_pack_then_normal(self):
+        episode_one = make_item("S04E01", season=4, episode=1, is_tv=True, is_prefetch=True)
+        episode_two = make_item("S04E02", season=4, episode=2, is_tv=True, is_prefetch=True)
+        season_pack = make_item("S04 pack", season=4, episode=999, is_tv=True, is_prefetch=True)
+        later_episode = make_item("S04E04", season=4, episode=4, is_tv=True)
+        later_season = make_item("S05E01", season=5, episode=1, is_tv=True)
+
+        ordered = app.queue_priority_order(
+            [later_season, season_pack, later_episode, episode_two, episode_one],
+            now=100,
+        )
+
+        self.assertEqual(
+            [item["name"] for item in ordered],
+            ["S04E01", "S04E02", "S04 pack", "S05E01", "S04E04"],
+        )
 
     def test_policy_tiers_and_early_finish_promotions(self):
         items = [
@@ -243,13 +263,13 @@ class ClientQueueMappingTests(unittest.TestCase):
 
 
 class RebalancePriorityTests(unittest.TestCase):
-    def test_rebalance_uses_trigger_episode_and_syncs_policy_order(self):
+    def test_rebalance_uses_prefetched_season_and_syncs_policy_order(self):
         added_on = int(app.time.time())
         early = make_item("Show S01E01", season=1, episode=1, is_tv=True, added_on=added_on)
         target = make_item("Show S01E02", season=1, episode=2, is_tv=True, added_on=added_on)
         output, synchronized_orders = run_rebalance_for_test([early, target], {"show": (1, 2)})
 
-        self.assertEqual(synchronized_orders, [["Show S01E02", "Show S01E01"]])
+        self.assertEqual(synchronized_orders, [["Show S01E01", "Show S01E02"]])
         self.assertIn("[REBALANCE]", output)
         self.assertNotIn("Show S01E02", output)
 
@@ -264,9 +284,9 @@ class RebalancePriorityTests(unittest.TestCase):
 
         self.assertIn("[QUEUE] rank=1", output)
         self.assertIn("tier=prefetch", output)
-        self.assertIn('title="Show S01E02"', output)
+        self.assertIn('title="Show S01E01"', output)
         self.assertIn("omitted=1", output)
-        self.assertNotIn("Show S01E01", output)
+        self.assertNotIn("Show S01E02", output)
 
     def test_opt_in_queue_details_identify_excluded_manual_pauses(self):
         paused = make_item(

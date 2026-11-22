@@ -17,13 +17,17 @@ lower-priority rule.
 
 1. **Manual resume:** A download the user manually resumed receives the highest
    priority.
-2. **Prefetcharr targets:** Matching titles for the trigger season and later
-   seasons rank ahead of normal downloads.
-   - In the trigger season, episodes at or after the trigger episode qualify.
-     Earlier episodes fall back to normal TV priority.
-   - An unknown trigger season or episode means all seasons or episodes qualify,
-     respectively.
-   - Matching individual episodes rank before matching season packs.
+2. **Prefetcharr targets:** Matching titles in the prefetched season rank ahead
+   of normal downloads.
+   - In the prefetched season, only episode 1, episode 2, and recognized season
+     packs qualify. Episodes 3 and later fall back to normal TV priority.
+   - Eligible prefetched items rank episode 1, then episode 2, then the season
+     pack. The season pack is recognized by its season-pack episode value.
+   - Later seasons do not qualify solely because they are later than the prefetched
+     season.
+   - An unknown trigger season means eligible episode 1, episode 2, and season
+     pack items across seasons qualify. An unknown trigger episode does not
+     broaden the eligible episodes beyond those three cases.
    - A Prefetcharr-targeted download remains in this tier while in progress.
 3. **Early-finish promotion:** A waiting download may move ahead of normal
    in-progress work when completing it first is expected to finish sooner.
