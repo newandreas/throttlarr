@@ -34,6 +34,7 @@ SAB_HOST = fix_url(os.getenv('SAB_HOST', 'sabnzbd:8080'))
 SAB_API_KEY = os.getenv('SAB_API_KEY', '')
 THROTTLARR_API_TOKEN = os.getenv('THROTTLARR_API_TOKEN', '')
 
+MAX_FILLS = int(os.environ.get('MAX_FILLS', 10))
 
 def sanitize_log_text(value, max_length=400):
     text = ' '.join(str(value).split())
@@ -514,8 +515,6 @@ def qbt_get_downloads():
         
         # Track manual qBittorrent changes with a 45-second grace period to allow 
         # for slow disk cache flushes on massive 4K files.
-        # Track manual qBittorrent changes with a 45-second grace period to allow 
-        # for slow disk cache flushes on massive 4K files.
         if hash_id in qbt_intended_states:
             state_data = qbt_intended_states[hash_id]
             
@@ -676,8 +675,6 @@ def sab_get_downloads():
 
         if now - added_on > MAX_RECENT_SECONDS:
             continue # SABnzbd items just drop off the radar
-        if now - added_on > MAX_RECENT_SECONDS:
-            continue # SABnzbd items just drop off the radar
 
         downloads.append(item)
     return downloads
@@ -730,6 +727,25 @@ def tv_priority_sort_key(item):
     return (is_season_pack, -season, episode, *stable_key)
 
 
+def prefetch_priority_sort_key(item):
+    episode = item.get('priority', (float('inf'), float('inf'), 2, 0))[1]
+    if episode == 1:
+        episode_tier = 0
+    elif episode == 2:
+        episode_tier = 1
+    elif episode == 999:
+        episode_tier = 2
+    else:
+        episode_tier = 3
+
+    stable_key = (
+        item.get('added_on', 0) or 0,
+        str(item.get('source', '')),
+        str(item.get('id', '')),
+    )
+    return (episode_tier, *stable_key)
+
+
 def is_prefetch_target(item, prefetch_shows):
     if not item.get('is_tv'):
         return False
@@ -745,11 +761,11 @@ def is_prefetch_target(item, prefetch_shows):
         else:
             trigger_season, trigger_episode = trigger, None
 
-        if trigger_season is None or item_season > trigger_season:
-            return True
-        if item_season == trigger_season and (
-            trigger_episode is None or item_episode == 999 or item_episode >= trigger_episode
-        ):
+        is_eligible_episode = item_episode in {1, 2, 999}
+        if trigger_season is None:
+            if is_eligible_episode:
+                return True
+        elif item_season == trigger_season and is_eligible_episode:
             return True
     return False
 
@@ -780,7 +796,7 @@ def queue_priority_order(items, now=None):
     completed = lambda item: item.get('completed_bytes', 0) or 0
 
     manual = sorted((item for item in eligible if item.get('is_manual_override')), key=stable_key)
-    prefetch = sorted((item for item in eligible if item.get('is_prefetch') and not item.get('is_manual_override')), key=tv_priority_sort_key)
+    prefetch = sorted((item for item in eligible if item.get('is_prefetch') and not item.get('is_manual_override')), key=prefetch_priority_sort_key)
     normal = [item for item in eligible if not item.get('is_manual_override') and not item.get('is_prefetch')]
     in_progress = sorted((item for item in normal if completed(item) > 0), key=lambda item: (remaining(item), *stable_key(item)))
     waiting = [item for item in normal if completed(item) == 0]
@@ -907,7 +923,6 @@ def qbt_toggle_torrents(active_hashes, all_items):
 
     global qbt_intended_states
     now_time = time.time()
-    now_time = time.time()
     for item in all_items:
         if item['source'] == 'qbit':
             if item.get('is_manual_pause'):
@@ -973,6 +988,7 @@ def rebalance_downloads():
             limit_str = f"{format_speed_limit_bytes(total_limit)}/s"
 
         item_actions = {}
+        active_fill_count = 0
         cap_paused_count = 0
         manual_paused_count = sum(bool(item.get('is_manual_pause')) for item in all_items)
         for item in managed_items:
@@ -992,10 +1008,14 @@ def rebalance_downloads():
             elif total_limit != float('inf') and active_bytes >= (total_limit * 0.90):
                 cap_paused_count += 1
                 item_actions[id(item)] = 'auto-paused-cap'
+            elif active_fill_count >= MAX_FILLS:
+                cap_paused_count += 1
+                item_actions[id(item)] = 'auto-paused-queue-limit'
             else:
                 active_items.append(item)
                 active_bytes += item['current_speed'] or 0
                 item_actions[id(item)] = 'active-fill'
+                active_fill_count += 1
                 if item['source'] == 'sab': has_active_sab = True
 
         current_str = (

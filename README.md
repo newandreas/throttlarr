@@ -11,7 +11,7 @@ Throttlarr is a Python service that manages download bandwidth for qBittorrent a
 
 * **Instant Response:** Uses media-server webhooks to start soft throttling the moment playback begins.
 * **Tracearr Sync:** Polls Tracearr on a configurable interval so throttling stays in sync with active streams, even when a webhook is missed.
-* **Prefetcharr Priority:** Scans recent Prefetcharr logs and prioritizes matching episodes from the trigger episode onward, plus later seasons.
+* **Prefetcharr Priority:** Scans recent Prefetcharr logs and prioritizes episode 1, episode 2, and the season pack in the prefetched season ahead of later episodes and normal downloads.
 * **Manual Override Detection:** Gives manually resumed downloads highest priority and excludes manually paused downloads from automation.
 * **Hybrid Queue Logic:** Keeps a priority-aware ordering across TV, prefetch items, manual overrides, and regular downloads instead of treating the queue as a flat list.
 * **SABnzbd Awareness:** Ignores stale SAB entries and manual pause states so the balancer does not interfere with user-driven downloads.
@@ -103,7 +103,7 @@ See the [download queue priority policy](docs/queue-priority.md) for the
 full rules and development guidance.
 
 1. **Manual resume:** A download manually resumed by the user gets the highest priority.
-2. **Prefetcharr targets:** Matching titles in the trigger season and later seasons outrank normal downloads. In the trigger season, episodes before the trigger episode do not qualify. Unknown trigger season or episode values broaden the match. Matching episodes sort ahead of season packs, and targeted downloads keep this priority while in progress.
+2. **Prefetcharr targets:** Matching titles in the prefetched season outrank normal downloads. Episode 1 ranks first, episode 2 ranks next, and the season pack ranks after them. Episodes 3 and later remain outside the Prefetcharr tier, and later seasons do not qualify solely for being newer. Targeted downloads keep this priority while in progress.
 3. **Early finish:** A waiting movie may move ahead of normal in-progress work when its full size is smaller than the top-ranked normal download's remaining bytes. A waiting TV episode uses the same comparison against the top-ranked normal in-progress TV episode. Neither promotion jumps ahead of manual resumes or Prefetcharr targets.
 4. **Other in-progress downloads:** The smallest remaining amount comes first.
 5. **Normal TV episodes:** Newer seasons come first, then earlier episodes within each season. Individual episodes sort before season packs.
